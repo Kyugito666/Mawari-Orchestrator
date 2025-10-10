@@ -12,17 +12,17 @@ TOKENS_FILE = 'config/tokens_mawari.json'
 SECRETS_FILE = 'config/secrets_mawari.json'
 TOKEN_CACHE_FILE = 'config/token_cache_mawari.json'
 INVITED_USERS_FILE = 'config/invited_users_mawari.txt'
-STAR_REPOS_FILE = 'star_repos.txt' # File baru untuk daftar repo
+STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
-# FUNGSI HELPER (Lengkap)
+# FUNGSI HELPER (DENGAN PERBAIKAN)
 # ==========================================================
-def run_command(command, env=None, input_data=None):
+def run_command(command, env=None, input=None): # <-- PERBAIKAN DI SINI
     """Menjalankan perintah shell dan mengembalikan (status, output)."""
     try:
         process = subprocess.run(
             command, shell=True, check=True, capture_output=True,
-            text=True, encoding='utf-8', env=env, input_data=input_data
+            text=True, encoding='utf-8', env=env, input=input # <-- PERBAIKAN DI SINI
         )
         return (True, process.stdout.strip())
     except subprocess.CalledProcessError as e:
@@ -69,11 +69,11 @@ def load_setup_config():
 # ==========================================================
 
 def convert_files_to_json():
-    # ... (Fungsi ini tetap sama) ...
     print("\n--- Opsi 1: Konversi Data dari .txt ke .json ---")
     print("1. Konversi Token (dari tokens.txt -> tokens_mawari.json)")
     print("2. Konversi Owner Address (dari owners.txt -> secrets_mawari.json)")
     choice = input("Pilih jenis konversi (1/2): ")
+
     if choice == '1':
         try:
             txt_filename = input("Masukkan nama file .txt berisi token (default: tokens.txt): ") or "tokens.txt"
@@ -89,6 +89,7 @@ def convert_files_to_json():
             print(f"❌ GAGAL: File '{txt_filename}' tidak ditemukan di folder 'orchestrator/'.")
         except Exception as e:
             print(f"❌ GAGAL: Terjadi error. Pesan: {e}")
+
     elif choice == '2':
         try:
             txt_filename = input("Masukkan nama file .txt berisi owner address (default: owners.txt): ") or "owners.txt"
@@ -114,7 +115,6 @@ def convert_files_to_json():
         print("Pilihan tidak valid.")
 
 def invite_collaborators(config):
-    # ... (Fungsi ini tetap sama) ...
     print("\n--- Opsi 2: Auto Invite Collaborator & Get Username ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
@@ -150,7 +150,6 @@ def invite_collaborators(config):
         save_lines_to_file(INVITED_USERS_FILE, newly_invited)
 
 def auto_set_secrets(config):
-    # ... (Fungsi ini tetap sama) ...
     print("\n--- Opsi 3: Auto Set Secrets untuk Mawari ---\n")
     secrets_to_set = load_json_file(SECRETS_FILE)
     if not secrets_to_set:
@@ -170,11 +169,10 @@ def auto_set_secrets(config):
         for name, value in secrets_to_set.items():
             if name.startswith("COMMENT_") or name.startswith("NOTE"): continue
             command = f'gh secret set {name} --app codespaces --repo "{repo_full_name}"'
-            run_command(command, env=env, input_data=str(value))
+            run_command(command, env=env, input=str(value)) # <-- PERBAIKAN DI SINI
         time.sleep(1)
 
 def auto_accept_invitations(config):
-    # ... (Fungsi ini tetap sama) ...
     print("\n--- Opsi 4: Auto Accept Collaboration Invitations ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     tokens = tokens_data.get('tokens', [])
@@ -194,19 +192,12 @@ def auto_accept_invitations(config):
         except (json.JSONDecodeError, AttributeError): continue
         time.sleep(1)
 
-# ==========================================================
-# FITUR BARU: AUTO FOLLOW & STAR
-# ==========================================================
 def auto_follow_and_star(config):
-    """Opsi 5: Follow akun utama dan star repositori dari daftar."""
     print("\n--- Opsi 5: Auto Follow & Multi-Repo Star ---\n")
-    
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
-        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 terlebih dahulu."); return
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 atau 2 terlebih dahulu."); return
     tokens = tokens_data['tokens']
-    
-    # 1. Auto Follow
     main_user = config['main_account_username']
     print(f"--- 1. Memulai Auto-Follow ke @{main_user} ---")
     for index, token in enumerate(tokens):
@@ -214,13 +205,10 @@ def auto_follow_and_star(config):
         env = os.environ.copy(); env['GH_TOKEN'] = token
         command = f"gh api --method PUT /user/following/{main_user} --silent"
         success, result = run_command(command, env=env)
-        if success:
-            print(f"     ✅ Berhasil follow @{main_user}")
-        else:
-            print(f"     ⚠️  Gagal follow atau sudah follow. Pesan: {result}")
+        if success: print(f"     ✅ Berhasil follow @{main_user}")
+        else: print(f"     ⚠️  Gagal follow atau sudah follow.")
         time.sleep(1)
 
-    # 2. Auto Star
     print(f"\n--- 2. Memulai Auto-Star dari {STAR_REPOS_FILE} ---")
     try:
         with open(STAR_REPOS_FILE, 'r') as f:
@@ -237,17 +225,14 @@ def auto_follow_and_star(config):
             env = os.environ.copy(); env['GH_TOKEN'] = token
             command = f"gh repo star {repo}"
             success, result = run_command(command, env=env)
-            if success:
-                print(f"       ✅ Berhasil star {repo}")
-            else:
-                print(f"       ⚠️  Gagal star atau sudah star. Pesan: {result}")
+            if success: print(f"       ✅ Berhasil star {repo}")
+            else: print(f"       ⚠️  Gagal star atau sudah star.")
             time.sleep(1)
 
 def main():
     """Fungsi utama untuk menjalankan setup tool."""
     config = load_setup_config()
     print(f"✅ Konfigurasi berhasil dimuat untuk repo: {config['blueprint_repo_name']}")
-
     while True:
         print("\n=============================================")
         print("      MAWARI ORCHESTRATOR SETUP TOOL")
@@ -256,7 +241,7 @@ def main():
         print("2. Validasi & Undang Kolaborator Baru")
         print("3. Auto Set Secrets (dengan Pengecekan)")
         print("4. Auto Accept Invitations")
-        print("5. [BARU] Auto Follow Akun Utama & Star Repositori")
+        print("5. Auto Follow Akun Utama & Star Repositori")
         print("---------------------------------------------")
         print("0. Keluar")
         choice = input("Pilih menu (1/2/3/4/5/0): ")
