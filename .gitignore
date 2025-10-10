@@ -1,0 +1,24 @@
+# Log files
+*.log
+mawari/*.log
+
+# OS & IDE specific
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Rust build artifacts
+target/
+Cargo.lock
+
+# =====================================================
+# PENTING: File sensitif dari orkestrator & setup tool
+# =====================================================
+orchestrator/tokens_mawari.json
+orchestrator/secrets_mawari.json
+orchestrator/config_setup.json
+orchestrator/token_cache_mawari.json
+orchestrator/invited_users_mawari.txt
+orchestrator/state.json
