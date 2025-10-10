@@ -308,7 +308,7 @@ def auto_accept_invitations(config):
 
 def auto_set_secrets(config):
     """Opsi 4: Sinkronisasi secrets ke semua akun."""
-    print("\n--- Opsi 4: Auto Set Secrets ---\n")
+    print("\n--- Opsi 4: Auto Set Secrets (User Codespaces Secrets) ---\n")
     secrets_to_set = load_json_file(SECRETS_FILE)
     if not secrets_to_set:
         print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan."); return
@@ -319,47 +319,61 @@ def auto_set_secrets(config):
     # Hitung jumlah secrets yang akan diatur (exclude COMMENT_ dan NOTE)
     actual_secrets = {k: v for k, v in secrets_to_set.items() if not k.startswith("COMMENT_") and not k.startswith("NOTE")}
     
+    print(f"📝 Akan mengatur {len(actual_secrets)} secrets ke user settings setiap akun")
+    print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}\n")
+    
+    # Get repo ID untuk selected repositories
+    main_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
+    
     for index, token in enumerate(tokens):
         username = token_cache.get(token)
         if not username: continue
-        print(f"\n--- Memproses Akun @{username} ({index + 1}/{len(tokens)}) ---")
+        print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...")
         
-        # Target repo adalah repo utama (blueprint) bukan fork
-        target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
         env = os.environ.copy(); env['GH_TOKEN'] = token
         
-        # Cek apakah user adalah kolaborator repo utama
-        check_collab = f"repos/{target_repo}/collaborators/{username}"
-        is_collaborator, _ = run_command(f"gh api {check_collab}", env=env)
+        # Dapatkan repository ID
+        print(f"   🔍 Mendapatkan repo ID...", end=" ")
+        repo_id_cmd = f"gh api repos/{main_repo} --jq .id"
+        success, repo_id = run_command(repo_id_cmd, env=env)
         
-        if is_collaborator:
-            print(f"   ✅ @{username} adalah kolaborator di {target_repo}")
-            print(f"   📝 Mengatur {len(actual_secrets)} secrets...")
-        else:
-            print(f"   ⚠️  @{username} belum menjadi kolaborator. Membuat fork...")
-            success, result = run_command(f"gh repo fork {target_repo} --clone=false --remote=false", env=env)
-            if success:
-                print(f"   ✅ Fork berhasil dibuat")
-                target_repo = f"{username}/{config['blueprint_repo_name']}"
-            else:
-                print(f"   ❌ Gagal membuat fork: {result}")
-                continue
-            time.sleep(3)
+        if not success:
+            print(f"❌ Gagal mendapatkan repo ID: {repo_id[:50]}...")
+            continue
+        print(f"✅ ID: {repo_id}")
         
-        # Set secrets ke target repo
+        # Set secrets ke USER CODESPACES (bukan repo secrets)
+        print(f"   🔐 Mengatur user codespaces secrets...")
         success_count = 0
+        
         for name, value in actual_secrets.items():
-            print(f"   - Mengatur secret '{name}'...", end=" ")
-            command = f'gh secret set {name} --app codespaces --repo "{target_repo}"'
-            success, result = run_command(command, env=env, input=str(value))
+            print(f"      - {name}...", end=" ")
+            
+            # Set secret di user level dengan selected repo
+            # Step 1: Set the secret value
+            set_secret_cmd = f'gh api -X PUT /user/codespaces/secrets/{name} -f visibility=selected'
+            success, result = run_command(set_secret_cmd, env=env, input=str(value))
+            
+            if not success:
+                print(f"❌ ({result[:40]}...)")
+                continue
+            
+            # Step 2: Add repository access to the secret
+            add_repo_cmd = f'gh api -X PUT /user/codespaces/secrets/{name}/repositories/{repo_id}'
+            success, result = run_command(add_repo_cmd, env=env)
+            
             if success:
                 print("✅")
                 success_count += 1
             else:
-                print(f"❌ ({result[:50]}...)")
+                print(f"⚠️ Secret dibuat tapi gagal add repo access")
         
-        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
+        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets\n")
         time.sleep(1)
+    
+    print(f"{'='*50}")
+    print(f"✅ Proses selesai untuk {len(tokens)} akun")
+    print(f"{'='*50}")
 
 def auto_follow_and_star(config):
     """Opsi 5: Follow akun utama dan star repositori dari daftar."""
