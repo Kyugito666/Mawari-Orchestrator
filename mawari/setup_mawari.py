@@ -4,51 +4,101 @@ import json
 import subprocess
 import os
 import time
+import sys
 
-# ==========================================================
-# KONFIGURASI
-# ==========================================================
-MAIN_TOKEN_CONFIG = "ghp_..." # Ganti dengan token utama Anda
-MAIN_ACCOUNT_USERNAME = "YourGitHubUsername" 
-BLUEPRINT_REPO_NAME = "Mawari-Orchestrator" # Sesuaikan dengan nama repo baru
-# ==========================================================
-
-# MODIFIED: Nama file spesifik untuk Mawari
+# --- Nama File Konfigurasi & Data ---
+CONFIG_FILE = 'config_setup.json'
 TOKENS_FILE = 'tokens_mawari.json'
 SECRETS_FILE = 'secrets_mawari.json'
 TOKEN_CACHE_FILE = 'token_cache_mawari.json'
 INVITED_USERS_FILE = 'invited_users_mawari.txt'
 
-def run_command(command, env=None, input_data=None):
+def load_setup_config():
+    """Memuat konfigurasi utama dari config_setup.json"""
     try:
-        process = subprocess.run(command, shell=True, check=True, capture_output=True, text=True, encoding='utf-8', env=env, input=input_data)
-        return (True, process.stdout.strip())
-    except subprocess.CalledProcessError as e:
-        return (False, f"{e.stdout.strip()} {e.stderr.strip()}")
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        print(f"❌ FATAL: File '{CONFIG_FILE}' tidak ditemukan atau formatnya salah.")
+        print("Pastikan file tersebut ada dan berisi 'main_account_username', 'main_token', dan 'blueprint_repo_name'.")
+        sys.exit(1) # Keluar dari script jika config tidak ada
 
-# ... (sisa fungsi helper seperti load_json_file, dll. tetap sama) ...
+# (Fungsi-fungsi lain seperti run_command, load_json_file, dll. tetap sama)
+# ...
+# ... (copy-paste fungsi run_command, load_json_file, save_json_file, 
+#      load_lines_from_file, save_lines_to_file dari script lama ke sini)
+# ...
 
-def invite_collaborators():
-    # ... (logika sama, tapi membaca dari TOKENS_FILE, TOKEN_CACHE_FILE, INVITED_USERS_FILE) ...
+def invite_collaborators(config):
+    """Opsi 1: Mengundang kolaborator berdasarkan token."""
+    print("\n--- Opsi 1: Auto Invite Collaborator & Get Username ---\n")
+    # ... (sisa kodenya sama persis, tapi variabelnya diambil dari 'config')
+    
+    # Ganti baris ini:
+    # env = os.environ.copy(); env['GH_TOKEN'] = MAIN_TOKEN_CONFIG
+    # menjadi:
+    env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
+    
+    # Ganti baris ini:
+    # if username.lower() == MAIN_ACCOUNT_USERNAME.lower(): continue
+    # menjadi:
+    if username.lower() == config['main_account_username'].lower(): continue
+    
+    # Ganti baris ini:
+    # command = f"gh api repos/{MAIN_ACCOUNT_USERNAME}/{BLUEPRINT_REPO_NAME}/collaborators/{username} -f permission=push --silent"
+    # menjadi:
+    command = f"gh api repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username} -f permission=push --silent"
+    
+    # ... (sisa logika di fungsi ini tetap sama)
 
-def auto_set_secrets():
-    print("\n--- Opsi 2: Auto Set Secrets untuk Mawari ---\n")
-    secrets_to_set = load_json_file(SECRETS_FILE)
-    if not secrets_to_set:
-        print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan atau kosong."); return
-    print(f"✅ Berhasil memuat secrets dari {SECRETS_FILE}.")
+def auto_set_secrets(config):
+    """Opsi 2: Sinkronisasi secrets ke semua akun."""
+    # ... (logikanya sama, tapi variabelnya diambil dari 'config')
 
-    # ... (sisa logika sama, tapi membaca dari TOKENS_FILE dan hanya set secret Mawari) ...
+    # Ganti baris ini:
+    # repo_full_name = f"{username}/{BLUEPRINT_REPO_NAME}"
+    # menjadi:
+    repo_full_name = f"{username}/{config['blueprint_repo_name']}"
 
-def auto_accept_invitations():
-    # ... (logika sama, tapi membaca dari TOKENS_FILE) ...
+    # Ganti baris ini:
+    # success, _ = run_command(f"gh repo fork {MAIN_ACCOUNT_USERNAME}/{BLUEPRINT_REPO_NAME} --clone=false --remote=false", env=env)
+    # menjadi:
+    success, _ = run_command(f"gh repo fork {config['main_account_username']}/{config['blueprint_repo_name']} --clone=false --remote=false", env=env)
+    # ... (sisa logika di fungsi ini tetap sama)
+
+def auto_accept_invitations(config):
+    """Opsi 3: Menerima undangan kolaborasi."""
+    # ... (logikanya sama, tapi variabelnya diambil dari 'config')
+
+    # Ganti baris ini:
+    # target_repo = f"{MAIN_ACCOUNT_USERNAME}/{BLUEPRINT_REPO_NAME}".lower()
+    # menjadi:
+    target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
+    # ... (sisa logika di fungsi ini tetap sama)
 
 def main():
+    """Fungsi utama untuk menjalankan setup tool."""
+    # Muat konfigurasi di awal
+    config = load_setup_config()
+    print(f"✅ Konfigurasi berhasil dimuat untuk repo: {config['blueprint_repo_name']}")
+
     while True:
         print("\n=============================================")
         print("      MAWARI ORCHESTRATOR SETUP TOOL")
         print("=============================================")
-        # ... (menu tetap sama) ...
+        print("1. Validasi & Undang Kolaborator Baru")
+        print("2. Auto Set Secrets (dengan Pengecekan)")
+        print("3. Auto Accept Invitations")
+        print("0. Keluar")
+        choice = input("Pilih menu (1/2/3/0): ")
+        if choice == '1': invite_collaborators(config)
+        elif choice == '2': auto_set_secrets(config)
+        elif choice == '3': auto_accept_invitations(config)
+        elif choice == '0':
+            print("Terima kasih!"); break
+        else:
+            print("Pilihan tidak valid.")
+        input("\nTekan Enter untuk kembali ke menu utama...")
 
 if __name__ == "__main__":
     main()
