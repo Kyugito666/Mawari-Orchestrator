@@ -1,4 +1,4 @@
-// orchestrator/src/main.rs - Production Ready Version
+// orchestrator/src/main.rs - Production Ready Version (Fixed)
 
 mod config;
 mod github;
@@ -10,7 +10,6 @@ use std::env;
 
 const STATE_FILE: &str = "state.json";
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3 * 3600 + 30 * 60); // 3.5 jam
-const MIN_QUOTA_HOURS: f32 = 1.0;
 const MAX_CONSECUTIVE_FAILURES: usize = 3;
 const FAILURE_COOLDOWN_SECS: u64 = 600; // 10 menit
 const DEPLOY_FAILURE_COOLDOWN_SECS: u64 = 900; // 15 menit
