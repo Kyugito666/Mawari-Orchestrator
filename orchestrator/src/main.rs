@@ -1,4 +1,4 @@
-// orchestrator/src/main.rs - Final Stable Hybrid Version
+// orchestrator/src/main.rs - Production Ready Version
 
 mod config;
 mod github;
@@ -10,8 +10,11 @@ use std::env;
 
 const STATE_FILE: &str = "state.json";
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3 * 3600 + 30 * 60); // 3.5 jam
+const MIN_QUOTA_HOURS: f32 = 1.0;
+const MAX_CONSECUTIVE_FAILURES: usize = 3;
+const FAILURE_COOLDOWN_SECS: u64 = 600; // 10 menit
+const DEPLOY_FAILURE_COOLDOWN_SECS: u64 = 900; // 15 menit
 
-// Fungsi untuk menampilkan status dari state.json
 fn show_status() {
     println!("╔════════════════════════════════════════════════╗");
     println!("║        ORCHESTRATOR STATUS                    ║");
@@ -44,7 +47,6 @@ fn show_status() {
     }
 }
 
-// Fungsi untuk memverifikasi kesehatan codespace yang sedang berjalan
 fn verify_current() {
     println!("╔════════════════════════════════════════════════╗");
     println!("║        VERIFIKASI NODE                      ║");
@@ -94,7 +96,6 @@ fn verify_current() {
     }
 }
 
-// Fungsi untuk menjalankan siklus keep-alive
 fn restart_nodes(token: &str, name1: &str, name2: &str, repo_name: &str) {
     println!("\n╔════════════════════════════════════════════════╗");
     println!("║        SIKLUS KEEP-ALIVE                      ║");
@@ -123,19 +124,40 @@ fn restart_nodes(token: &str, name1: &str, name2: &str, repo_name: &str) {
     println!("\n✅ Siklus keep-alive selesai!\n");
 }
 
-// Fungsi utama program
+fn switch_to_next_token(
+    current_index: usize, 
+    total_tokens: usize,
+    state: &mut config::State
+) -> usize {
+    let next_index = (current_index + 1) % total_tokens;
+    state.current_account_index = next_index;
+    
+    // Clear node names saat switch account untuk force re-create
+    state.mawari_node_1_name.clear();
+    state.mawari_node_2_name.clear();
+    
+    if let Err(e) = config::save_state(STATE_FILE, state) {
+        eprintln!("⚠️ Gagal save state: {}", e);
+    }
+    
+    next_index
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     
     if args.len() > 1 {
         let command = args[1].trim_matches('"');
-        if command == "status" {
-            show_status();
-            return;
-        }
-        if command == "verify" {
-            verify_current();
-            return;
+        match command {
+            "status" => {
+                show_status();
+                return;
+            }
+            "verify" => {
+                verify_current();
+                return;
+            }
+            _ => {}
         }
     }
     
@@ -151,7 +173,7 @@ fn main() {
 
     println!("╔════════════════════════════════════════════════╗");
     println!("║   MAWARI 12-NODE MULTI-WALLET ORCHESTRATOR    ║");
-    println!("║            (Versi Stabil Terpadu)             ║");
+    println!("║            (Versi Production-Ready)           ║");
     println!("╚════════════════════════════════════════════════╝");
     println!("📦 Repositori: {}", repo_name);
     println!("");
@@ -173,10 +195,10 @@ fn main() {
     if i >= config.tokens.len() {
         println!("⚠️ Mereset indeks tidak valid {} ke 0", i);
         i = 0;
+        state.current_account_index = 0;
     }
 
     let mut consecutive_failures = 0;
-    const MAX_FAILURES: usize = 3;
 
     println!("\n🚀 Memulai loop orkestrasi...\n");
 
@@ -187,6 +209,7 @@ fn main() {
         println!("║           TOKEN #{:<2} dari {:<2}                   ║", i + 1, config.tokens.len());
         println!("╚════════════════════════════════════════════════╝");
 
+        // === PHASE 1: Token Validation ===
         let username = match github::get_username(token) {
             Ok(u) => {
                 println!("✅ Token valid untuk: @{}", u);
@@ -197,28 +220,27 @@ fn main() {
                 eprintln!("❌ Error token: {}", e);
                 consecutive_failures += 1;
                 
-                if consecutive_failures >= MAX_FAILURES {
-                    eprintln!("\n⚠️ Terlalu banyak kegagalan ({}). Cooldown 10 menit...", consecutive_failures);
-                    thread::sleep(Duration::from_secs(600));
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    eprintln!("\n⚠️ Terlalu banyak kegagalan token ({}). Cooldown {} menit...", 
+                        consecutive_failures, FAILURE_COOLDOWN_SECS / 60);
+                    thread::sleep(Duration::from_secs(FAILURE_COOLDOWN_SECS));
                     consecutive_failures = 0;
                 }
                 
-                i = (i + 1) % config.tokens.len();
-                state.current_account_index = i;
-                config::save_state(STATE_FILE, &state).ok();
+                i = switch_to_next_token(i, config.tokens.len(), &mut state);
                 thread::sleep(Duration::from_secs(5));
                 continue;
             }
         };
 
+        // === PHASE 2: Billing Check ===
         println!("\n📊 Mengecek kuota billing...");
         let billing = match billing::get_billing_info(token, &username) {
             Ok(b) => b,
-            Err(_) => {
-                eprintln!("⚠️ Pengecekan billing gagal. Anggap habis...");
-                i = (i + 1) % config.tokens.len();
-                state.current_account_index = i;
-                config::save_state(STATE_FILE, &state).ok();
+            Err(e) => {
+                eprintln!("⚠️ Pengecekan billing gagal: {}", e);
+                eprintln!("   Anggap kuota habis, skip ke akun berikutnya...");
+                i = switch_to_next_token(i, config.tokens.len(), &mut state);
                 thread::sleep(Duration::from_secs(5));
                 continue;
             }
@@ -227,13 +249,12 @@ fn main() {
         if !billing.is_quota_ok {
             eprintln!("\n⚠️ Kuota tidak cukup untuk @{}", username);
             eprintln!("   Beralih ke akun berikutnya...\n");
-            i = (i + 1) % config.tokens.len();
-            state.current_account_index = i;
-            config::save_state(STATE_FILE, &state).ok();
+            i = switch_to_next_token(i, config.tokens.len(), &mut state);
             thread::sleep(Duration::from_secs(5));
             continue;
         }
 
+        // === PHASE 3: Codespace Deployment ===
         println!("\n🚀 Memastikan Codespace sehat untuk @{}...", username);
         let (node1_name, node2_name) = match github::ensure_healthy_codespaces(token, repo_name, &state) {
             Ok(names) => {
@@ -244,9 +265,10 @@ fn main() {
                 eprintln!("\n❌ Deployment gagal: {}", e);
                 consecutive_failures += 1;
                 
-                if consecutive_failures >= MAX_FAILURES {
-                    eprintln!("\n⚠️ Terlalu banyak kegagalan deployment. Cooldown 15 menit...", consecutive_failures);
-                    thread::sleep(Duration::from_secs(900));
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    eprintln!("\n⚠️ Terlalu banyak kegagalan deployment ({}). Cooldown {} menit...", 
+                        consecutive_failures, DEPLOY_FAILURE_COOLDOWN_SECS / 60);
+                    thread::sleep(Duration::from_secs(DEPLOY_FAILURE_COOLDOWN_SECS));
                     consecutive_failures = 0;
                 } else {
                     eprintln!("   Mencoba lagi dalam 5 menit...");
@@ -256,6 +278,7 @@ fn main() {
             }
         };
 
+        // === PHASE 4: Success - Save State ===
         println!("\n╔════════════════════════════════════════════════╗");
         println!("║         DEPLOYMENT BERHASIL! 🎉              ║");
         println!("╚════════════════════════════════════════════════╝");
@@ -266,9 +289,15 @@ fn main() {
         state.current_account_index = i;
         state.mawari_node_1_name = node1_name.clone();
         state.mawari_node_2_name = node2_name.clone();
-        config::save_state(STATE_FILE, &state).ok();
+        
+        if let Err(e) = config::save_state(STATE_FILE, &state) {
+            eprintln!("⚠️ Gagal save state: {}", e);
+        }
 
-        let run_duration_hours = (billing.hours_remaining - 0.5).max(0.5).min(20.0);
+        // === PHASE 5: Calculate Runtime ===
+        let run_duration_hours = (billing.hours_remaining - 0.5)
+            .max(0.5)
+            .min(20.0);
         let run_duration = Duration::from_secs((run_duration_hours * 3600.0) as u64);
         
         println!("\n⏱️ Berjalan selama {:.1} jam", run_duration_hours);
@@ -277,6 +306,7 @@ fn main() {
         let start_time = Instant::now();
         let mut cycle_count = 0;
         
+        // === PHASE 6: Keep-Alive Loop ===
         while start_time.elapsed() < run_duration {
             let remaining = run_duration.saturating_sub(start_time.elapsed());
             let sleep_for = std::cmp::min(remaining, KEEP_ALIVE_INTERVAL);
@@ -300,6 +330,7 @@ fn main() {
             restart_nodes(token, &node1_name, &node2_name, repo_name);
         }
         
+        // === PHASE 7: Cycle Complete ===
         println!("\n╔════════════════════════════════════════════════╗");
         println!("║         SIKLUS SELESAI                        ║");
         println!("╚════════════════════════════════════════════════╝");
@@ -308,12 +339,9 @@ fn main() {
         println!("Siklus Keep-alive: {}", cycle_count);
         println!("⏭️ Beralih ke token berikutnya...\n");
         
-        i = (i + 1) % config.tokens.len();
-        state.current_account_index = i;
-        config::save_state(STATE_FILE, &state).ok();
+        i = switch_to_next_token(i, config.tokens.len(), &mut state);
         
         println!("⏸️ Cooldown 30 detik...");
         thread::sleep(Duration::from_secs(30));
     }
 }
-
