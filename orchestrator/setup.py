@@ -235,25 +235,76 @@ def auto_accept_invitations(config):
     """Opsi 3: Menerima undangan kolaborasi."""
     print("\n--- Opsi 3: Auto Accept Collaboration Invitations ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
-    if not tokens_data or 'tokens' not in tokens_data: return
+    if not tokens_data or 'tokens' not in tokens_data: 
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan."); return
+    
     tokens = tokens_data.get('tokens', [])
     target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
+    
+    accepted_count = 0
+    already_member = 0
+    no_invitation = 0
+    
+    print(f"🎯 Target Repo: {target_repo}\n")
+    
     for index, token in enumerate(tokens):
         env = os.environ.copy(); env['GH_TOKEN'] = token
         success, username = run_command("gh api user --jq .login", env=env)
-        if not success: continue
-        print(f"--- Memproses Akun @{username} ({index + 1}/{len(tokens)}) ---")
+        if not success: 
+            print(f"[{index + 1}/{len(tokens)}] ❌ Token tidak valid")
+            continue
+        
+        print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...", end=" ")
+        
+        # Cek apakah sudah menjadi kolaborator
+        check_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
+        is_collaborator, _ = run_command(f"gh api {check_endpoint}", env=env)
+        
+        if is_collaborator:
+            print("✅ Sudah menjadi kolaborator")
+            already_member += 1
+            time.sleep(0.5)
+            continue
+        
+        # Ambil daftar undangan
         success, invitations_json = run_command("gh api /user/repository_invitations", env=env)
-        if not success: continue
+        if not success: 
+            print(f"❌ Gagal mengambil undangan")
+            continue
+        
         try:
             invitations = json.loads(invitations_json)
+            found_invitation = False
+            
             for inv in invitations:
                 if inv.get("repository", {}).get("full_name", "").lower() == target_repo:
-                    accept_cmd = f"gh api --method PATCH /user/repository_invitations/{inv.get('id')} --silent"
-                    run_command(accept_cmd, env=env)
-                    print(f"   ✅ Undangan untuk {target_repo} diterima.")
-        except (json.JSONDecodeError, AttributeError): continue
+                    found_invitation = True
+                    invitation_id = inv.get('id')
+                    accept_cmd = f"gh api --method PATCH /user/repository_invitations/{invitation_id} --silent"
+                    accept_success, accept_result = run_command(accept_cmd, env=env)
+                    
+                    if accept_success:
+                        print("✅ Undangan diterima!")
+                        accepted_count += 1
+                    else:
+                        print(f"❌ Gagal accept ({accept_result[:30]}...)")
+                    break
+            
+            if not found_invitation:
+                print("ℹ️  Tidak ada undangan")
+                no_invitation += 1
+                
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"❌ Error parsing: {e}")
+        
         time.sleep(1)
+    
+    print(f"\n{'='*50}")
+    print(f"📊 Summary:")
+    print(f"   ✅ Undangan diterima: {accepted_count}")
+    print(f"   👥 Sudah kolaborator: {already_member}")
+    print(f"   ℹ️  Tidak ada undangan: {no_invitation}")
+    print(f"{'='*50}")
 
 def auto_set_secrets(config):
     """Opsi 4: Sinkronisasi secrets ke semua akun."""
@@ -264,22 +315,50 @@ def auto_set_secrets(config):
     tokens_data = load_json_file(TOKENS_FILE)
     tokens = tokens_data.get('tokens', [])
     token_cache = load_json_file(TOKEN_CACHE_FILE)
+    
+    # Hitung jumlah secrets yang akan diatur (exclude COMMENT_ dan NOTE)
+    actual_secrets = {k: v for k, v in secrets_to_set.items() if not k.startswith("COMMENT_") and not k.startswith("NOTE")}
+    
     for index, token in enumerate(tokens):
         username = token_cache.get(token)
         if not username: continue
         print(f"\n--- Memproses Akun @{username} ({index + 1}/{len(tokens)}) ---")
-        repo_full_name = f"{username}/{config['blueprint_repo_name']}"
+        
+        # Target repo adalah repo utama (blueprint) bukan fork
+        target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
         env = os.environ.copy(); env['GH_TOKEN'] = token
-        success, _ = run_command(f"gh repo view {repo_full_name}", env=env)
-        if not success:
-            print(f"   - Fork tidak ditemukan. Membuat fork...")
-            run_command(f"gh repo fork {config['main_account_username']}/{config['blueprint_repo_name']} --clone=false --remote=false", env=env)
-            time.sleep(5)
-        for name, value in secrets_to_set.items():
-            if name.startswith("COMMENT_") or name.startswith("NOTE"): continue
-            print(f"   - Mengatur secret '{name}'...")
-            command = f'gh secret set {name} --app codespaces --repo "{repo_full_name}"'
-            run_command(command, env=env, input=str(value))
+        
+        # Cek apakah user adalah kolaborator repo utama
+        check_collab = f"repos/{target_repo}/collaborators/{username}"
+        is_collaborator, _ = run_command(f"gh api {check_collab}", env=env)
+        
+        if is_collaborator:
+            print(f"   ✅ @{username} adalah kolaborator di {target_repo}")
+            print(f"   📝 Mengatur {len(actual_secrets)} secrets...")
+        else:
+            print(f"   ⚠️  @{username} belum menjadi kolaborator. Membuat fork...")
+            success, result = run_command(f"gh repo fork {target_repo} --clone=false --remote=false", env=env)
+            if success:
+                print(f"   ✅ Fork berhasil dibuat")
+                target_repo = f"{username}/{config['blueprint_repo_name']}"
+            else:
+                print(f"   ❌ Gagal membuat fork: {result}")
+                continue
+            time.sleep(3)
+        
+        # Set secrets ke target repo
+        success_count = 0
+        for name, value in actual_secrets.items():
+            print(f"   - Mengatur secret '{name}'...", end=" ")
+            command = f'gh secret set {name} --app codespaces --repo "{target_repo}"'
+            success, result = run_command(command, env=env, input=str(value))
+            if success:
+                print("✅")
+                success_count += 1
+            else:
+                print(f"❌ ({result[:50]}...)")
+        
+        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
         time.sleep(1)
 
 def auto_follow_and_star(config):
