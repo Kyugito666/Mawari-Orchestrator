@@ -5,7 +5,7 @@ import subprocess
 import os
 import time
 import sys
-import tempfile
+import base64
 
 # --- Nama File Konfigurasi & Data ---
 CONFIG_FILE = 'config/setup.json'
@@ -18,10 +18,9 @@ SECRETS_SET_FILE = 'config/secrets_set.txt'
 STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
-# FUNGSI HELPER (Lengkap dengan Retry Koneksi)
+# FUNGSI HELPER
 # ==========================================================
-def run_command(command, env=None, input=None, max_retries=3):
-    """Menjalankan perintah dengan mekanisme retry untuk masalah koneksi."""
+def run_command(command, env=None, input=None, max_retries=3, timeout=30):
     retry_delay = 30
     retry_count = 0
     
@@ -29,7 +28,7 @@ def run_command(command, env=None, input=None, max_retries=3):
         try:
             process = subprocess.run(
                 command, shell=True, check=True, capture_output=True,
-                text=True, encoding='utf-8', env=env, input=input, timeout=30
+                text=True, encoding='utf-8', env=env, input=input, timeout=timeout
             )
             return (True, process.stdout.strip())
         except subprocess.TimeoutExpired:
@@ -98,6 +97,23 @@ def load_setup_config():
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         print(f"❌ FATAL: File '{CONFIG_FILE}' tidak ditemukan atau formatnya salah.")
+        sys.exit(1)
+
+# ==========================================================
+# CRYPTO HELPER UNTUK SODIUM ENCRYPTION
+# ==========================================================
+def encrypt_secret(public_key_b64, secret_value):
+    """Encrypt secret menggunakan libsodium (via pynacl)"""
+    try:
+        from nacl import encoding, public
+        
+        public_key = public.PublicKey(public_key_b64.encode("utf-8"), encoding.Base64Encoder())
+        sealed_box = public.SealedBox(public_key)
+        encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+        return base64.b64encode(encrypted).decode("utf-8")
+    except ImportError:
+        print("❌ ERROR: Library PyNaCl tidak ditemukan!")
+        print("Install dengan: pip install pynacl")
         sys.exit(1)
 
 # ==========================================================
@@ -326,7 +342,7 @@ def auto_accept_invitations(config):
     print(f"{'='*50}")
 
 def auto_set_secrets(config):
-    print("\n--- Opsi 4: Auto Set Secrets (User Codespaces Secrets) ---\n")
+    print("\n--- Opsi 4: Auto Set Secrets (Direct API) ---\n")
     
     secrets_to_set = load_json_file(SECRETS_FILE)
     if not secrets_to_set:
@@ -342,14 +358,15 @@ def auto_set_secrets(config):
                      if not k.startswith("COMMENT_") and not k.startswith("NOTE") and v}
     
     if not actual_secrets:
-        print("❌ Tidak ada secrets valid untuk di-set (semua kosong atau comment)")
+        print("❌ Tidak ada secrets valid untuk di-set")
         return
     
-    print(f"📝 Akan mengatur {len(actual_secrets)} secrets ke user settings setiap akun")
+    print(f"📝 Akan mengatur {len(actual_secrets)} secrets")
     print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}")
-    print(f"📋 {len(secrets_set_users)} user sudah pernah diproses sebelumnya\n")
+    print(f"📋 {len(secrets_set_users)} user sudah diproses\n")
     
-    main_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
+    main_owner = config['main_account_username']
+    main_repo = config['blueprint_repo_name']
     skipped_count = 0
     
     for index, token in enumerate(tokens):
@@ -358,77 +375,86 @@ def auto_set_secrets(config):
             continue
         
         if username.lower() in (u.lower() for u in secrets_set_users):
-            print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Secrets sudah di-set sebelumnya (skip)")
+            print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Skip")
             skipped_count += 1
             time.sleep(0.3)
             continue
         
-        print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...")
+        print(f"[{index + 1}/{len(tokens)}] @{username}...")
         
         env = os.environ.copy()
         env['GH_TOKEN'] = token
         
-        print(f"   🔐 Mengatur user codespaces secrets...")
+        # Get repo ID
+        print(f"   🔍 Get repo ID...", end=" ")
+        cmd = f'gh api repos/{main_owner}/{main_repo} --jq .id'
+        success, repo_id = run_command(cmd, env=env, timeout=15)
+        if not success:
+            print(f"❌ Gagal: {repo_id[:40]}")
+            continue
+        print(f"✅ {repo_id}")
+        
+        # Get public key
+        print(f"   🔑 Get public key...", end=" ")
+        cmd = f'gh api /user/codespaces/secrets/public-key'
+        success, pubkey_json = run_command(cmd, env=env, timeout=15)
+        if not success:
+            print(f"❌ Gagal: {pubkey_json[:40]}")
+            continue
+        
+        try:
+            pubkey_data = json.loads(pubkey_json)
+            public_key = pubkey_data['key']
+            key_id = pubkey_data['key_id']
+            print(f"✅")
+        except:
+            print(f"❌ Parse gagal")
+            continue
+        
+        print(f"   🔐 Set secrets...")
         success_count = 0
-        failed_secrets = []
         
         for name, value in actual_secrets.items():
             print(f"      - {name}...", end=" ", flush=True)
             
             try:
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tmp:
-                    tmp.write(str(value))
-                    tmp_path = tmp.name
+                encrypted_value = encrypt_secret(public_key, str(value))
                 
-                if os.name == 'nt':
-                    command = f'type "{tmp_path}" | gh secret set {name} --user --repos "{main_repo}"'
-                else:
-                    command = f'cat "{tmp_path}" | gh secret set {name} --user --repos "{main_repo}"'
+                payload = json.dumps({
+                    "encrypted_value": encrypted_value,
+                    "key_id": key_id,
+                    "selected_repository_ids": [int(repo_id)]
+                })
                 
-                success, result = run_command(command, env=env, max_retries=2)
+                cmd = f"gh api --method PUT /user/codespaces/secrets/{name} --input -"
+                success, result = run_command(cmd, env=env, input=payload, timeout=15, max_retries=1)
                 
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-                
-                success_indicators = ["✓", "set secret", "updated secret"]
-                is_success = success or any(indicator in result.lower() for indicator in success_indicators) or result == ""
-                
-                if is_success:
+                if success or result == "":
                     print("✅")
                     success_count += 1
                 else:
-                    print(f"❌")
-                    error_msg = result[:60] if result else "Unknown error"
-                    failed_secrets.append((name, error_msg))
+                    print(f"❌ {result[:30]}")
                 
-                time.sleep(0.5)
+                time.sleep(0.3)
                 
             except Exception as e:
-                print(f"❌ (Exception: {str(e)[:40]})")
-                failed_secrets.append((name, str(e)[:60]))
+                print(f"❌ {str(e)[:30]}")
         
-        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
-        
-        if failed_secrets:
-            print(f"   ⚠️  Gagal:")
-            for secret_name, error in failed_secrets[:3]:
-                print(f"      • {secret_name}: {error}")
+        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)}")
         
         if success_count == len(actual_secrets):
             save_lines_to_file(SECRETS_SET_FILE, [username])
             secrets_set_users.add(username)
-            print(f"   ✅ User ditandai sebagai selesai\n")
+            print(f"   ✅ Selesai\n")
         else:
-            print(f"   ⚠️  Tidak semua secrets berhasil, tidak ditandai selesai\n")
+            print(f"   ⚠️  Sebagian gagal\n")
         
         time.sleep(1)
     
     print(f"{'='*50}")
-    print(f"✅ Proses selesai!")
-    print(f"   📝 Diproses: {len(tokens) - skipped_count} akun")
-    print(f"   ⏭️  Dilewati: {skipped_count} akun")
+    print(f"✅ Selesai!")
+    print(f"   📝 Diproses: {len(tokens) - skipped_count}")
+    print(f"   ⏭️  Dilewati: {skipped_count}")
     print(f"{'='*50}")
 
 def auto_follow_and_star(config):
