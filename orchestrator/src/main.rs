@@ -14,10 +14,11 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(4 * 3600); // 4 jam
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("❌ ERROR: Gunakan: cargo run --release -- username/nama-repo");
+        eprintln!("❌ ERROR: Gunakan: cargo run --release -- \"username/nama-repo\"");
         return;
     }
-    let repo_name = &args[1];
+    // FIX: Trim quotes that might come from the batch file
+    let repo_name = args[1].trim_matches('"');
 
     println!("==================================================");
     println!("      MAWARI MULTI-CODESPACE ORCHESTRATOR");
@@ -61,12 +62,16 @@ fn main() {
             continue;
         }
 
-        let (cs1_name, cs2_name) = match github::ensure_mawari_codespaces(token, repo_name) {
+        // FIX: Handle deployment failure by moving to the next token
+        let (cs1_name, cs2_name) = match github::ensure_mawari_codespaces(token, repo_name, &state) {
             Ok(names) => names,
             Err(e) => {
-                eprintln!("❌ Deployment gagal: {}", e);
-                thread::sleep(Duration::from_secs(5 * 60));
-                continue;
+                eprintln!("❌ Deployment gagal: {}. Mencoba token berikutnya...", e);
+                current_token_index = (current_token_index + 1) % config.tokens.len();
+                state.current_account_index = current_token_index;
+                config::save_state(STATE_FILE, &state).ok();
+                thread::sleep(Duration::from_secs(5)); // Brief pause before next token
+                continue; // Skip to the next iteration of the loop
             }
         };
 
