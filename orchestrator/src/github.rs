@@ -1,4 +1,4 @@
-// orchestrator/src/github.rs - Fixed with proper stdout capture
+// orchestrator/src/github.rs - Fixed warnings
 
 use crate::config::State;
 use std::process::{Command, Stdio};
@@ -41,9 +41,6 @@ fn run_gh_command_with_timeout(token: &str, args: &[&str], timeout_secs: u64) ->
     let stdout_reader = BufReader::new(stdout);
     let stderr_reader = BufReader::new(stderr);
 
-    let mut stdout_lines = Vec::new();
-    let mut stderr_lines = Vec::new();
-
     let stdout_handle = thread::spawn(move || {
         stdout_reader.lines().filter_map(|line| line.ok()).collect::<Vec<_>>()
     });
@@ -73,8 +70,8 @@ fn run_gh_command_with_timeout(token: &str, args: &[&str], timeout_secs: u64) ->
         return Err(GHError::Timeout(format!("Command timeout setelah {}s", timeout_secs)));
     }
 
-    stdout_lines = stdout_handle.join().unwrap_or_default();
-    stderr_lines = stderr_handle.join().unwrap_or_default();
+    let stdout_lines = stdout_handle.join().unwrap_or_default();
+    let stderr_lines = stderr_handle.join().unwrap_or_default();
 
     let status = child.wait().map_err(|e| GHError::CommandError(format!("Wait failed: {}", e)))?;
 
@@ -268,7 +265,6 @@ fn create_codespace_with_retry(
     for attempt in 1..=max_retries {
         println!("      Attempt {}/{} untuk membuat '{}'...", attempt, max_retries, display_name);
         
-        // Gunakan -R (bukan -r yang deprecated)
         let result = run_gh_command_with_timeout(
             token,
             &[
@@ -279,13 +275,13 @@ fn create_codespace_with_retry(
                 "--idle-timeout", "240m",
                 "--default-permissions"
             ],
-            150 // 2.5 menit untuk create
+            150
         );
         
         match result {
             Ok(output) if !output.trim().is_empty() => {
                 let name = output.lines().next().unwrap_or(&output).trim();
-                if name.len() > 5 { // Validasi format nama codespace
+                if name.len() > 5 {
                     println!("      ✅ Berhasil dibuat: {}", name);
                     return Ok(name.to_string());
                 } else {
@@ -300,7 +296,6 @@ fn create_codespace_with_retry(
                 eprintln!("      ❌ Error pada attempt {}: {}", attempt, 
                     err_msg.lines().next().unwrap_or("unknown"));
                 
-                // Jika auth error, langsung fail tanpa retry
                 if err_msg.contains("Bad credentials") || err_msg.contains("HTTP 401") || err_msg.contains("HTTP 403") {
                     return Err(e);
                 }
@@ -308,7 +303,7 @@ fn create_codespace_with_retry(
         }
         
         if attempt < max_retries {
-            let wait_time = 15 * attempt as u64; // Backoff eksponensial
+            let wait_time = 15 * attempt as u64;
             eprintln!("      ⏳ Retry dalam {} detik...", wait_time);
             thread::sleep(Duration::from_secs(wait_time));
         }
