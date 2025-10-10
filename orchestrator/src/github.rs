@@ -1,4 +1,4 @@
-// orchestrator/src/github.rs - Production-Ready Version
+// orchestrator/src/github.rs - Production-Ready Version (Fixed with latest gh flags)
 
 use crate::config::State;
 use std::process::{Command, Stdio};
@@ -264,7 +264,6 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
     let mut found_cs2 = false;
 
     if !list_output.is_empty() {
-        // Parse sebagai array JSON utuh, bukan per-line
         if let Ok(codespaces) = serde_json::from_str::<Vec<serde_json::Value>>(&list_output) {
             for cs in codespaces {
                 let name = cs["name"].as_str().unwrap_or("").to_string();
@@ -274,7 +273,6 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
                 
                 if cs_repo != repo { continue; }
 
-                // Process Node 1
                 if display_name == "mawari-multi-node-1" && !found_cs1 {
                     println!("  Menemukan 'mawari-multi-node-1': {} (State: {})", name, cs_state);
                     
@@ -291,7 +289,6 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
                     }
                 }
 
-                // Process Node 2
                 if display_name == "mawari-multi-node-2" && !found_cs2 {
                     println!("  Menemukan 'mawari-multi-node-2': {} (State: {})", name, cs_state);
                     
@@ -316,15 +313,14 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
     let repo_basename = repo.split('/').last().unwrap_or("Mawari-Orchestrator");
     let script_path = format!("/workspaces/{}/mawari/auto-start.sh", repo_basename);
 
-    // Create Node 1 jika belum ada
     if !found_cs1 {
         println!("  Membuat 'mawari-multi-node-1'...");
         let new_name = run_gh_command(token, &[
             "codespace", "create", 
-            "-r", repo, 
-            "-m", "standardLinux32gb",
+            "--repo", repo, 
+            "--machine", "standardLinux32gb",
             "--display-name", "mawari-multi-node-1", 
-            "--idle-timeout", "240m"
+            "--idle-timeout-minutes", "240"
         ])?;
         
         if new_name.is_empty() { 
@@ -334,22 +330,20 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
         node1_name = new_name;
         println!("     Dibuat: {}", node1_name);
         
-        thread::sleep(Duration::from_secs(5)); // Beri waktu provisioning
+        thread::sleep(Duration::from_secs(5));
         wait_and_run_startup_script(token, &node1_name, &script_path, "PRIMARY")?;
     }
     
-    // Gap lebih lama antar node creation untuk stabilitas
     thread::sleep(Duration::from_secs(15));
     
-    // Create Node 2 jika belum ada
     if !found_cs2 {
         println!("  Membuat 'mawari-multi-node-2'...");
         let new_name = run_gh_command(token, &[
             "codespace", "create", 
-            "-r", repo, 
-            "-m", "standardLinux32gb",
+            "--repo", repo, 
+            "--machine", "standardLinux32gb",
             "--display-name", "mawari-multi-node-2", 
-            "--idle-timeout", "240m"
+            "--idle-timeout-minutes", "240"
         ])?;
         
         if new_name.is_empty() { 
