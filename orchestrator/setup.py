@@ -6,7 +6,7 @@ import os
 import time
 import sys
 
-# --- Nama File Konfigurasi & Data (SUDAH DISIMPLIFY) ---
+# --- Nama File Konfigurasi & Data ---
 CONFIG_FILE = 'config/setup.json'
 TOKENS_FILE = 'config/tokens.json'
 SECRETS_FILE = 'config/secrets.json'
@@ -146,19 +146,23 @@ def invite_collaborators(config):
 
     print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
     env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
-    repo_url = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
+    
     newly_invited = set()
 
     for username in usernames_to_invite:
         print(f"   - Mengirim undangan ke @{username}...")
-        command = f'gh repo collaborator add {repo_url} {username} -p push'
+        # ==========================================================
+        # PERBAIKAN FINAL BERDASARKAN CONTOH LO
+        # ==========================================================
+        endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
+        command = f"gh api --silent -X PUT -f permission='push' {endpoint}"
         success, result = run_command(command, env=env)
         
         if success:
             print(f"     ✅ Undangan untuk @{username} berhasil dikirim!")
             newly_invited.add(username)
         else:
-            if "is already a collaborator" in result.lower():
+            if "already a collaborator" in result.lower():
                 print(f"     ℹ️  @{username} sudah menjadi kolaborator.")
                 newly_invited.add(username)
             else:
