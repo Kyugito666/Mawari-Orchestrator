@@ -1,86 +1,4 @@
-def auto_set_secrets(config):
-    """Opsi 4: Sinkronisasi secrets ke semua akun."""
-    print("\n--- Opsi 4: Auto Set Secrets (User Codespaces Secrets) ---\n")
-    secrets_to_set = load_json_file(SECRETS_FILE)
-    if not secrets_to_set:
-        print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan."); return
-    tokens_data = load_json_file(TOKENS_FILE)
-    tokens = tokens_data.get('tokens', [])
-    token_cache = load_json_file(TOKEN_CACHE_FILE)
-    secrets_set_users = load_lines_from_file(SECRETS_SET_FILE)  # Load riwayat
-    
-    # Hitung jumlah secrets yang akan diatur (exclude COMMENT_ dan NOTE)
-    actual_secrets = {k: v for k, v in secrets_to_set.items() 
-                     if not k.startswith("COMMENT_") and not k.startswith("NOTE") and v}
-    
-    if not actual_secrets:
-        print("❌ Tidak ada secrets valid untuk di-set (semua kosong atau comment)"); return
-    
-    print(f"📝 Akan mengatur {len(actual_secrets)} secrets ke user settings setiap akun")
-    print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}")
-    print(f"📋 {len(secrets_set_users)} user sudah pernah diproses sebelumnya\n")
-    
-    main_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
-    skipped_count = 0
-    
-    for index, token in enumerate(tokens):
-        username = token_cache.get(token)
-        if not username: continue
-        
-        # Skip jika sudah pernah di-set secrets
-        if username.lower() in (u.lower() for u in secrets_set_users):
-            print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Secrets sudah di-set sebelumnya (skip)")
-            skipped_count += 1
-            time.sleep(0.3)
-            continue
-        
-        print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...")
-        
-        env = os.environ.copy(); env['GH_TOKEN'] = token
-        
-        print(f"   🔐 Mengatur user codespaces secrets...")
-        success_count = 0
-        failed_secrets = []
-        
-        for name, value in actual_secrets.items():
-            print(f"      - {name}...", end=" ", flush=True)
-            
-            # Gunakan gh secret set dengan --user untuk user-level codespaces secrets
-            # Format: gh secret set SECRET_NAME --user --repos "owner/repo"
-            command = f'gh secret set {name} --user --repos "{main_repo}"'
-            success, result = run_command(command, env=env, input=str(value))
-            
-            if success or "✓" in result or "set secret" in result.lower():
-                print("✅")
-                success_count += 1
-            else:
-                print(f"❌")
-                failed_secrets.append(f"{name}: {result[:50]}")
-        
-        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
-        
-        # Tampilkan error detail jika ada yang gagal
-        if failed_secrets and len(failed_secrets) <= 3:
-            print(f"   ⚠️  Gagal:")
-            for err in failed_secrets[:3]:
-                print(f"      • {err}")
-        
-        # Jika berhasil set semua secrets, simpan ke riwayat
-        if success_count == len(actual_secrets):
-            save_lines_to_file(SECRETS_SET_FILE, [username])
-            secrets_set_users.add(username)
-            print(f"   ✅ User ditandai sebagai selesai\n")
-        else:
-            print(f"   ⚠️  Tidak semua secrets berhasil, tidak ditandai selesai\n")
-        
-        time.sleep(1)
-    
-    print(f"{'='*50}")
-    print(f"✅ Proses selesai!")
-    print(f"   📝 Diproses: {len(tokens) - skipped_count} akun")
-    print(f"   ⏭️  Dilewati: {skipped_count} akun")
-    print(f"{'='*50}")
-                        # orchestrator/setup.py
+# orchestrator/setup.py
 
 import json
 import subprocess
@@ -425,16 +343,19 @@ def auto_set_secrets(config):
     tokens_data = load_json_file(TOKENS_FILE)
     tokens = tokens_data.get('tokens', [])
     token_cache = load_json_file(TOKEN_CACHE_FILE)
-    secrets_set_users = load_lines_from_file(SECRETS_SET_FILE)  # Load riwayat
+    secrets_set_users = load_lines_from_file(SECRETS_SET_FILE)
     
-    # Hitung jumlah secrets yang akan diatur (exclude COMMENT_ dan NOTE)
-    actual_secrets = {k: v for k, v in secrets_to_set.items() if not k.startswith("COMMENT_") and not k.startswith("NOTE")}
+    # Filter secrets yang valid (exclude COMMENT_, NOTE, dan empty values)
+    actual_secrets = {k: v for k, v in secrets_to_set.items() 
+                     if not k.startswith("COMMENT_") and not k.startswith("NOTE") and v}
+    
+    if not actual_secrets:
+        print("❌ Tidak ada secrets valid untuk di-set (semua kosong atau comment)"); return
     
     print(f"📝 Akan mengatur {len(actual_secrets)} secrets ke user settings setiap akun")
     print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}")
     print(f"📋 {len(secrets_set_users)} user sudah pernah diproses sebelumnya\n")
     
-    # Get repo ID untuk selected repositories
     main_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
     skipped_count = 0
     
@@ -453,43 +374,32 @@ def auto_set_secrets(config):
         
         env = os.environ.copy(); env['GH_TOKEN'] = token
         
-        # Dapatkan repository ID
-        print(f"   🔍 Mendapatkan repo ID...", end=" ")
-        repo_id_cmd = f"gh api repos/{main_repo} --jq .id"
-        success, repo_id = run_command(repo_id_cmd, env=env)
-        
-        if not success:
-            print(f"❌ Gagal mendapatkan repo ID: {repo_id[:50]}...")
-            continue
-        print(f"✅ ID: {repo_id}")
-        
-        # Set secrets ke USER CODESPACES (bukan repo secrets)
         print(f"   🔐 Mengatur user codespaces secrets...")
         success_count = 0
+        failed_secrets = []
         
         for name, value in actual_secrets.items():
-            print(f"      - {name}...", end=" ")
+            print(f"      - {name}...", end=" ", flush=True)
             
-            # Set secret di user level dengan selected repo
-            # Step 1: Set the secret value
-            set_secret_cmd = f'gh api -X PUT /user/codespaces/secrets/{name} -f visibility=selected'
-            success, result = run_command(set_secret_cmd, env=env, input=str(value))
+            # Command baru: gh secret set NAME --user --repos "owner/repo"
+            command = f'gh secret set {name} --user --repos "{main_repo}"'
+            success, result = run_command(command, env=env, input=str(value), max_retries=2)
             
-            if not success:
-                print(f"❌ ({result[:40]}...)")
-                continue
-            
-            # Step 2: Add repository access to the secret
-            add_repo_cmd = f'gh api -X PUT /user/codespaces/secrets/{name}/repositories/{repo_id}'
-            success, result = run_command(add_repo_cmd, env=env)
-            
-            if success:
+            # Cek berbagai indikator success
+            if success or "✓" in result or "set secret" in result.lower() or result == "":
                 print("✅")
                 success_count += 1
             else:
-                print(f"⚠️ Secret dibuat tapi gagal add repo access")
+                print(f"❌")
+                failed_secrets.append((name, result[:60]))
         
         print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
+        
+        # Tampilkan error detail jika ada yang gagal (max 3)
+        if failed_secrets:
+            print(f"   ⚠️  Gagal:")
+            for secret_name, error in failed_secrets[:3]:
+                print(f"      • {secret_name}: {error}")
         
         # Jika berhasil set semua secrets, simpan ke riwayat
         if success_count == len(actual_secrets):
