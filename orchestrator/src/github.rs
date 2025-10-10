@@ -1,4 +1,4 @@
-// orchestrator/src/github.rs - Production-Ready Version (Fixed with stable flags)
+// orchestrator/src/github.rs - Production-Ready Version (Most Stable Fix)
 
 use crate::config::State;
 use std::process::{Command, Stdio};
@@ -95,7 +95,7 @@ fn run_gh_command_with_timeout(token: &str, args: &[&str], timeout_secs: u64) ->
 }
 
 fn run_gh_command(token: &str, args: &[&str]) -> Result<String, GHError> {
-    run_gh_command_with_timeout(token, args, 60)
+    run_gh_command_with_timeout(token, args, 90) // Timeout diperpanjang untuk create
 }
 
 pub fn get_username(token: &str) -> Result<String, GHError> {
@@ -118,7 +118,7 @@ fn stop_codespace(token: &str, name: &str) -> Result<(), GHError> {
                     thread::sleep(Duration::from_secs(2));
                 } else {
                     eprintln!("      Peringatan saat berhenti: {}", e);
-                    return Ok(()); // Non-blocking
+                    return Ok(());
                 }
             }
         }
@@ -192,7 +192,6 @@ fn health_check(token: &str, name: &str) -> bool {
 pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, setup_mode: &str) -> Result<(), GHError> {
     println!("   Memverifikasi dan menjalankan node di '{}'...", name);
     
-    // Phase 1: SSH Readiness Check
     for attempt in 1..=8 {
         println!("      SSH Check {}/8...", attempt);
         
@@ -219,7 +218,6 @@ pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, s
         }
     }
     
-    // Phase 2: Script Execution
     let exec_command = format!(
         "bash -l -c 'export SETUP_MODE={} && nohup bash {} > /tmp/mawari_startup.log 2>&1 & echo $!'",
         setup_mode, 
@@ -244,7 +242,7 @@ pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, s
         Err(e) => {
             eprintln!("      Peringatan eksekusi: {}", 
                 e.to_string().lines().next().unwrap_or("unknown"));
-            Ok(()) // Non-blocking untuk startup script
+            Ok(())
         }
     }
 }
@@ -255,58 +253,42 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
     let mut node1_name = state.mawari_node_1_name.clone();
     let mut node2_name = state.mawari_node_2_name.clone();
 
-    let list_output = run_gh_command(
-        token, 
-        &["codespace", "list", "--json", "name,repository,state,displayName"]
-    )?;
+    let list_output = run_gh_command(token, &["codespace", "list"])?;
     
     let mut found_cs1 = false;
     let mut found_cs2 = false;
 
     if !list_output.is_empty() {
-        if let Ok(codespaces) = serde_json::from_str::<Vec<serde_json::Value>>(&list_output) {
-            for cs in codespaces {
-                let name = cs["name"].as_str().unwrap_or("").to_string();
-                let cs_repo = cs["repository"]["nameWithOwner"].as_str().unwrap_or("");
-                let cs_state = cs["state"].as_str().unwrap_or("");
-                let display_name = cs["displayName"].as_str().unwrap_or("");
-                
-                if cs_repo != repo { continue; }
+        for line in list_output.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() > 4 {
+                let name = parts[0].to_string();
+                let display_name = parts[4].to_string();
 
                 if display_name == "mawari-multi-node-1" && !found_cs1 {
-                    println!("  Menemukan 'mawari-multi-node-1': {} (State: {})", name, cs_state);
-                    
-                    if cs_state == "Available" && health_check(token, &name) {
+                    println!("  Menemukan 'mawari-multi-node-1': {}", name);
+                    if health_check(token, &name) {
                         println!("    Health check LULUS. Digunakan kembali.");
                         node1_name = name.clone();
                         found_cs1 = true;
                     } else {
                         println!("    Health check GAGAL. Dibuat ulang...");
-                        if cs_state == "Available" || cs_state == "Running" {
-                            stop_codespace(token, &name)?;
-                        }
                         delete_codespace(token, &name)?;
                     }
                 }
 
                 if display_name == "mawari-multi-node-2" && !found_cs2 {
-                    println!("  Menemukan 'mawari-multi-node-2': {} (State: {})", name, cs_state);
-                    
-                    if cs_state == "Available" && health_check(token, &name) {
+                    println!("  Menemukan 'mawari-multi-node-2': {}", name);
+                    if health_check(token, &name) {
                         println!("    Health check LULUS. Digunakan kembali.");
                         node2_name = name.clone();
                         found_cs2 = true;
                     } else {
                         println!("    Health check GAGAL. Dibuat ulang...");
-                        if cs_state == "Available" || cs_state == "Running" {
-                            stop_codespace(token, &name)?;
-                        }
                         delete_codespace(token, &name)?;
                     }
                 }
             }
-        } else {
-            eprintln!("  Peringatan: Format list codespace tidak valid");
         }
     }
     
@@ -320,7 +302,8 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
             "-r", repo, 
             "-m", "standardLinux32gb",
             "--display-name", "mawari-multi-node-1", 
-            "--idle-timeout", "240m"
+            "--idle-timeout", "240m",
+            "--default-permissions"
         ])?;
         
         if new_name.is_empty() { 
@@ -343,7 +326,8 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
             "-r", repo, 
             "-m", "standardLinux32gb",
             "--display-name", "mawari-multi-node-2", 
-            "--idle-timeout", "240m"
+            "--idle-timeout", "240m",
+            "--default-permissions"
         ])?;
         
         if new_name.is_empty() { 
