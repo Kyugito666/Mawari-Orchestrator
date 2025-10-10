@@ -20,14 +20,15 @@ pub struct State {
 
 pub fn load_config(path: &str) -> io::Result<Config> {
     // Membaca dari sub-folder 'config'
-    if !Path::new(path).exists() {
+    let full_path = Path::new("config").join(path);
+    if !full_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("File {} tidak ditemukan", path)
+            format!("File {} tidak ditemukan", full_path.display())
         ));
     }
     
-    let data = fs::read_to_string(path)?;
+    let data = fs::read_to_string(&full_path)?;
     let config: Config = serde_json::from_str(&data)
         .map_err(|e| io::Error::new(
             io::ErrorKind::InvalidData,
