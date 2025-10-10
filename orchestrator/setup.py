@@ -15,18 +15,30 @@ INVITED_USERS_FILE = 'config/invited_users.txt'
 STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
-# FUNGSI HELPER (Lengkap dan Sudah Diperbaiki)
+# FUNGSI HELPER (DENGAN LOGIKA RETRY)
 # ==========================================================
 def run_command(command, env=None, input=None):
-    """Menjalankan perintah shell dan mengembalikan (status, output)."""
-    try:
-        process = subprocess.run(
-            command, shell=True, check=True, capture_output=True,
-            text=True, encoding='utf-8', env=env, input=input
-        )
-        return (True, process.stdout.strip())
-    except subprocess.CalledProcessError as e:
-        return (False, f"{e.stdout.strip()} {e.stderr.strip()}")
+    """Menjalankan perintah dengan mekanisme retry untuk masalah koneksi."""
+    retry_delay = 60  # Jeda dalam detik sebelum mencoba lagi
+    while True:
+        try:
+            process = subprocess.run(
+                command, shell=True, check=True, capture_output=True,
+                text=True, encoding='utf-8', env=env, input=input
+            )
+            return (True, process.stdout.strip())
+        except subprocess.CalledProcessError as e:
+            error_message = f"{e.stdout.strip()} {e.stderr.strip()}"
+            
+            # --- MEKANISME RETRY OTOMATIS ---
+            if "connecting to api.github.com" in error_message or "could not resolve host" in error_message.lower():
+                print(f"     ❌ KONEKSI GAGAL. Mencoba lagi dalam {retry_delay} detik...")
+                time.sleep(retry_delay)
+                print("     🔄 Mencoba ulang perintah...")
+                continue # Kembali ke awal loop untuk mencoba lagi
+            else:
+                # Jika error bukan karena koneksi, kembalikan pesan error
+                return (False, error_message.strip())
 
 def load_json_file(filename):
     """Memuat data dari file JSON."""
@@ -146,23 +158,19 @@ def invite_collaborators(config):
 
     print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
     env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
-    
+    repo_url = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
     newly_invited = set()
 
     for username in usernames_to_invite:
         print(f"   - Mengirim undangan ke @{username}...")
-        # ==========================================================
-        # PERBAIKAN FINAL BERDASARKAN CONTOH LO
-        # ==========================================================
-        endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
-        command = f"gh api --silent -X PUT -f permission='push' {endpoint}"
+        command = f'gh repo collaborator add {repo_url} {username} -p push'
         success, result = run_command(command, env=env)
         
         if success:
             print(f"     ✅ Undangan untuk @{username} berhasil dikirim!")
             newly_invited.add(username)
         else:
-            if "already a collaborator" in result.lower():
+            if "is already a collaborator" in result.lower():
                 print(f"     ℹ️  @{username} sudah menjadi kolaborator.")
                 newly_invited.add(username)
             else:
