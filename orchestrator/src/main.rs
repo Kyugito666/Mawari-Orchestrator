@@ -23,9 +23,8 @@ fn main() {
     println!("      MAWARI MULTI-CODESPACE ORCHESTRATOR");
     println!("==================================================");
     
-    // --- PERUBAHAN DI SINI ---
-    println!("\nMemuat config/tokens_mawari.json...");
-    let config = match config::load_config("config/tokens_mawari.json") {
+    println!("\nMemuat config/tokens.json...");
+    let config = match config::load_config("config/tokens.json") {
         Ok(cfg) => cfg,
         Err(e) => { eprintln!("FATAL: {}", e); return; }
     };
