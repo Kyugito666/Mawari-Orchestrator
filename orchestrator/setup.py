@@ -5,6 +5,7 @@ import subprocess
 import os
 import time
 import sys
+import tempfile
 
 # --- Nama File Konfigurasi & Data ---
 CONFIG_FILE = 'config/setup.json'
@@ -21,7 +22,7 @@ STAR_REPOS_FILE = 'star_repos.txt'
 # ==========================================================
 def run_command(command, env=None, input=None, max_retries=3):
     """Menjalankan perintah dengan mekanisme retry untuk masalah koneksi."""
-    retry_delay = 30  # Jeda dalam detik sebelum mencoba lagi
+    retry_delay = 30
     retry_count = 0
     
     while retry_count < max_retries:
@@ -42,7 +43,6 @@ def run_command(command, env=None, input=None, max_retries=3):
         except subprocess.CalledProcessError as e:
             error_message = f"{e.stdout.strip()} {e.stderr.strip()}".lower()
             
-            # Cek apakah error karena koneksi
             connection_errors = [
                 "connecting to api.github.com",
                 "could not resolve host",
@@ -70,7 +70,6 @@ def run_command(command, env=None, input=None, max_retries=3):
     return (False, "Max retries exceeded")
 
 def load_json_file(filename):
-    """Memuat data dari file JSON."""
     try:
         with open(filename, 'r') as f:
             return json.load(f)
@@ -78,12 +77,10 @@ def load_json_file(filename):
         return {}
 
 def save_json_file(filename, data):
-    """Menyimpan data ke file JSON."""
     with open(filename, 'w') as f:
         json.dump(data, f, indent=4)
 
 def load_lines_from_file(filename):
-    """Memuat baris dari file teks ke dalam sebuah set."""
     try:
         with open(filename, 'r') as f:
             return {line.strip() for line in f if line.strip()}
@@ -91,13 +88,11 @@ def load_lines_from_file(filename):
         return set()
 
 def save_lines_to_file(filename, lines):
-    """Menambahkan baris baru ke file teks."""
     with open(filename, 'a') as f:
         for line in lines:
             f.write(f"{line}\n")
 
 def load_setup_config():
-    """Memuat konfigurasi utama dari setup.json"""
     try:
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
@@ -110,7 +105,6 @@ def load_setup_config():
 # ==========================================================
 
 def convert_files_to_json():
-    """Opsi 1: Konversi file .txt (Token atau Owner) ke format .json."""
     print("\n--- Opsi 1: Konversi Data dari .txt ke .json ---")
     print("1. Konversi Token (dari tokens.txt -> tokens.json)")
     print("2. Konversi Owner Address (dari owners.txt -> secrets.json)")
@@ -155,28 +149,31 @@ def convert_files_to_json():
         print("Pilihan tidak valid.")
 
 def invite_collaborators(config):
-    """Opsi 2: Mengundang kolaborator berdasarkan token."""
     print("\n--- Opsi 2: Auto Invite Collaborator & Get Username ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
-        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 terlebih dahulu."); return
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 terlebih dahulu.")
+        return
 
     tokens = tokens_data['tokens']
     token_cache = load_json_file(TOKEN_CACHE_FILE)
     invited_users = load_lines_from_file(INVITED_USERS_FILE)
     usernames_to_invite = []
 
-    # Validasi dan kumpulkan username
     for index, token in enumerate(tokens):
         print(f"--- Memvalidasi Token {index + 1}/{len(tokens)} ---")
         username = token_cache.get(token)
         if not username:
-            env = os.environ.copy(); env['GH_TOKEN'] = token
+            env = os.environ.copy()
+            env['GH_TOKEN'] = token
             success, result = run_command("gh api user --jq .login", env=env)
             if success:
-                username = result; print(f"   ✅ Token valid untuk @{username}"); token_cache[token] = username
+                username = result
+                print(f"   ✅ Token valid untuk @{username}")
+                token_cache[token] = username
             else:
-                print(f"   ⚠️  Token tidak valid. Pesan: {result}"); continue
+                print(f"   ⚠️  Token tidak valid. Pesan: {result}")
+                continue
         
         if username and username.lower() not in (u.lower() for u in invited_users) and username.lower() != config['main_account_username'].lower():
             usernames_to_invite.append(username)
@@ -184,17 +181,18 @@ def invite_collaborators(config):
     save_json_file(TOKEN_CACHE_FILE, token_cache)
     
     if not usernames_to_invite:
-        print("\n✅ Tidak ada user baru untuk diundang (semua sudah ada di daftar)."); return
+        print("\n✅ Tidak ada user baru untuk diundang (semua sudah ada di daftar).")
+        return
 
     print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
-    env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
+    env = os.environ.copy()
+    env['GH_TOKEN'] = config['main_token']
     
     newly_invited = set()
 
     for idx, username in enumerate(usernames_to_invite, 1):
         print(f"\n[{idx}/{len(usernames_to_invite)}] Memproses @{username}...")
         
-        # Cek status kolaborator terlebih dahulu
         check_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
         check_command = f"gh api {check_endpoint}"
         is_collaborator, _ = run_command(check_command, env=env)
@@ -202,12 +200,10 @@ def invite_collaborators(config):
         if is_collaborator:
             print(f"     ℹ️  @{username} sudah menjadi kolaborator (skip invite).")
             newly_invited.add(username)
-            # Langsung simpan ke file
             save_lines_to_file(INVITED_USERS_FILE, [username])
             time.sleep(0.5)
             continue
         
-        # Kirim undangan
         print(f"     📤 Mengirim undangan...")
         invite_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
         invite_command = f"gh api --silent -X PUT -f permission='push' {invite_endpoint}"
@@ -216,7 +212,6 @@ def invite_collaborators(config):
         if success:
             print(f"     ✅ Undangan berhasil dikirim!")
             newly_invited.add(username)
-            # Langsung simpan ke file setelah berhasil
             save_lines_to_file(INVITED_USERS_FILE, [username])
         else:
             if "already a collaborator" in result.lower():
@@ -234,15 +229,15 @@ def invite_collaborators(config):
     print(f"{'='*50}")
 
 def auto_accept_invitations(config):
-    """Opsi 3: Menerima undangan kolaborasi."""
     print("\n--- Opsi 3: Auto Accept Collaboration Invitations ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data: 
-        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan."); return
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan.")
+        return
     
     tokens = tokens_data.get('tokens', [])
     token_cache = load_json_file(TOKEN_CACHE_FILE)
-    accepted_users = load_lines_from_file(ACCEPTED_USERS_FILE)  # Load riwayat
+    accepted_users = load_lines_from_file(ACCEPTED_USERS_FILE)
     target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
     
     accepted_count = 0
@@ -256,7 +251,8 @@ def auto_accept_invitations(config):
     for index, token in enumerate(tokens):
         username = token_cache.get(token)
         if not username:
-            env = os.environ.copy(); env['GH_TOKEN'] = token
+            env = os.environ.copy()
+            env['GH_TOKEN'] = token
             success, result = run_command("gh api user --jq .login", env=env)
             if not success: 
                 print(f"[{index + 1}/{len(tokens)}] ❌ Token tidak valid")
@@ -264,7 +260,6 @@ def auto_accept_invitations(config):
             username = result
             token_cache[token] = username
         
-        # Skip jika sudah pernah diproses
         if username.lower() in (u.lower() for u in accepted_users):
             print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Sudah diproses sebelumnya (skip)")
             skipped_count += 1
@@ -272,22 +267,20 @@ def auto_accept_invitations(config):
             continue
         
         print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...", end=" ")
-        env = os.environ.copy(); env['GH_TOKEN'] = token
+        env = os.environ.copy()
+        env['GH_TOKEN'] = token
         
-        # Cek apakah sudah menjadi kolaborator
         check_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
         is_collaborator, _ = run_command(f"gh api {check_endpoint}", env=env)
         
         if is_collaborator:
             print("✅ Sudah menjadi kolaborator")
             already_member += 1
-            # Simpan ke riwayat
             save_lines_to_file(ACCEPTED_USERS_FILE, [username])
             accepted_users.add(username)
             time.sleep(0.5)
             continue
         
-        # Ambil daftar undangan
         success, invitations_json = run_command("gh api /user/repository_invitations", env=env)
         if not success: 
             print(f"❌ Gagal mengambil undangan")
@@ -307,7 +300,6 @@ def auto_accept_invitations(config):
                     if accept_success:
                         print("✅ Undangan diterima!")
                         accepted_count += 1
-                        # Simpan ke riwayat
                         save_lines_to_file(ACCEPTED_USERS_FILE, [username])
                         accepted_users.add(username)
                     else:
@@ -323,7 +315,6 @@ def auto_accept_invitations(config):
         
         time.sleep(1)
     
-    # Simpan token cache
     save_json_file(TOKEN_CACHE_FILE, token_cache)
     
     print(f"\n{'='*50}")
@@ -335,22 +326,24 @@ def auto_accept_invitations(config):
     print(f"{'='*50}")
 
 def auto_set_secrets(config):
-    """Opsi 4: Sinkronisasi secrets ke semua akun."""
     print("\n--- Opsi 4: Auto Set Secrets (User Codespaces Secrets) ---\n")
+    
     secrets_to_set = load_json_file(SECRETS_FILE)
     if not secrets_to_set:
-        print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan."); return
+        print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan.")
+        return
+    
     tokens_data = load_json_file(TOKENS_FILE)
     tokens = tokens_data.get('tokens', [])
     token_cache = load_json_file(TOKEN_CACHE_FILE)
     secrets_set_users = load_lines_from_file(SECRETS_SET_FILE)
     
-    # Filter secrets yang valid (exclude COMMENT_, NOTE, dan empty values)
     actual_secrets = {k: v for k, v in secrets_to_set.items() 
                      if not k.startswith("COMMENT_") and not k.startswith("NOTE") and v}
     
     if not actual_secrets:
-        print("❌ Tidak ada secrets valid untuk di-set (semua kosong atau comment)"); return
+        print("❌ Tidak ada secrets valid untuk di-set (semua kosong atau comment)")
+        return
     
     print(f"📝 Akan mengatur {len(actual_secrets)} secrets ke user settings setiap akun")
     print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}")
@@ -361,9 +354,9 @@ def auto_set_secrets(config):
     
     for index, token in enumerate(tokens):
         username = token_cache.get(token)
-        if not username: continue
+        if not username:
+            continue
         
-        # Skip jika sudah pernah di-set secrets
         if username.lower() in (u.lower() for u in secrets_set_users):
             print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Secrets sudah di-set sebelumnya (skip)")
             skipped_count += 1
@@ -372,7 +365,8 @@ def auto_set_secrets(config):
         
         print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...")
         
-        env = os.environ.copy(); env['GH_TOKEN'] = token
+        env = os.environ.copy()
+        env['GH_TOKEN'] = token
         
         print(f"   🔐 Mengatur user codespaces secrets...")
         success_count = 0
@@ -381,27 +375,47 @@ def auto_set_secrets(config):
         for name, value in actual_secrets.items():
             print(f"      - {name}...", end=" ", flush=True)
             
-            # Command baru: gh secret set NAME --user --repos "owner/repo"
-            command = f'gh secret set {name} --user --repos "{main_repo}"'
-            success, result = run_command(command, env=env, input=str(value), max_retries=2)
-            
-            # Cek berbagai indikator success
-            if success or "✓" in result or "set secret" in result.lower() or result == "":
-                print("✅")
-                success_count += 1
-            else:
-                print(f"❌")
-                failed_secrets.append((name, result[:60]))
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tmp:
+                    tmp.write(str(value))
+                    tmp_path = tmp.name
+                
+                if os.name == 'nt':
+                    command = f'type "{tmp_path}" | gh secret set {name} --user --repos "{main_repo}"'
+                else:
+                    command = f'cat "{tmp_path}" | gh secret set {name} --user --repos "{main_repo}"'
+                
+                success, result = run_command(command, env=env, max_retries=2)
+                
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+                
+                success_indicators = ["✓", "set secret", "updated secret"]
+                is_success = success or any(indicator in result.lower() for indicator in success_indicators) or result == ""
+                
+                if is_success:
+                    print("✅")
+                    success_count += 1
+                else:
+                    print(f"❌")
+                    error_msg = result[:60] if result else "Unknown error"
+                    failed_secrets.append((name, error_msg))
+                
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"❌ (Exception: {str(e)[:40]})")
+                failed_secrets.append((name, str(e)[:60]))
         
         print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
         
-        # Tampilkan error detail jika ada yang gagal (max 3)
         if failed_secrets:
             print(f"   ⚠️  Gagal:")
             for secret_name, error in failed_secrets[:3]:
                 print(f"      • {secret_name}: {error}")
         
-        # Jika berhasil set semua secrets, simpan ke riwayat
         if success_count == len(actual_secrets):
             save_lines_to_file(SECRETS_SET_FILE, [username])
             secrets_set_users.add(username)
@@ -418,17 +432,18 @@ def auto_set_secrets(config):
     print(f"{'='*50}")
 
 def auto_follow_and_star(config):
-    """Opsi 5: Follow akun utama dan star repositori dari daftar."""
     print("\n--- Opsi 5: Auto Follow & Multi-Repo Star ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
-        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan."); return
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan.")
+        return
     tokens = tokens_data['tokens']
     main_user = config['main_account_username']
     print(f"--- 1. Memulai Auto-Follow ke @{main_user} ---")
     for index, token in enumerate(tokens):
         print(f"   - Menggunakan Token {index + 1}/{len(tokens)}...")
-        env = os.environ.copy(); env['GH_TOKEN'] = token
+        env = os.environ.copy()
+        env['GH_TOKEN'] = token
         command = f"gh api --method PUT /user/following/{main_user} --silent"
         run_command(command, env=env)
         time.sleep(1)
@@ -438,20 +453,22 @@ def auto_follow_and_star(config):
         with open(STAR_REPOS_FILE, 'r') as f:
             repos_to_star = [line.strip() for line in f if line.strip()]
         if not repos_to_star:
-            print(f"⚠️  File '{STAR_REPOS_FILE}' kosong."); return
+            print(f"⚠️  File '{STAR_REPOS_FILE}' kosong.")
+            return
     except FileNotFoundError:
-        print(f"❌ GAGAL: File '{STAR_REPOS_FILE}' tidak ditemukan."); return
+        print(f"❌ GAGAL: File '{STAR_REPOS_FILE}' tidak ditemukan.")
+        return
 
     for repo in repos_to_star:
         print(f"\n   - Menargetkan Repositori: {repo}")
         for index, token in enumerate(tokens):
-            env = os.environ.copy(); env['GH_TOKEN'] = token
+            env = os.environ.copy()
+            env['GH_TOKEN'] = token
             command = f"gh repo star {repo}"
             run_command(command, env=env)
             time.sleep(1)
 
 def main():
-    """Fungsi utama untuk menjalankan setup tool."""
     config = load_setup_config()
     print(f"✅ Konfigurasi berhasil dimuat untuk repo: {config['blueprint_repo_name']}")
     while True:
@@ -472,7 +489,8 @@ def main():
         elif choice == '4': auto_set_secrets(config)
         elif choice == '5': auto_follow_and_star(config)
         elif choice == '0':
-            print("Terima kasih!"); break
+            print("Terima kasih!")
+            break
         else:
             print("Pilihan tidak valid.")
         input("\nTekan Enter untuk kembali ke menu utama...")
