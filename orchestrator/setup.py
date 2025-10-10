@@ -15,7 +15,7 @@ INVITED_USERS_FILE = 'config/invited_users.txt'
 STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
-# FUNGSI HELPER (DENGAN LOGIKA RETRY)
+# FUNGSI HELPER (Lengkap dengan Retry Koneksi)
 # ==========================================================
 def run_command(command, env=None, input=None):
     """Menjalankan perintah dengan mekanisme retry untuk masalah koneksi."""
@@ -30,14 +30,12 @@ def run_command(command, env=None, input=None):
         except subprocess.CalledProcessError as e:
             error_message = f"{e.stdout.strip()} {e.stderr.strip()}"
             
-            # --- MEKANISME RETRY OTOMATIS ---
             if "connecting to api.github.com" in error_message or "could not resolve host" in error_message.lower():
                 print(f"     ❌ KONEKSI GAGAL. Mencoba lagi dalam {retry_delay} detik...")
                 time.sleep(retry_delay)
                 print("     🔄 Mencoba ulang perintah...")
                 continue # Kembali ke awal loop untuk mencoba lagi
             else:
-                # Jika error bukan karena koneksi, kembalikan pesan error
                 return (False, error_message.strip())
 
 def load_json_file(filename):
@@ -158,19 +156,20 @@ def invite_collaborators(config):
 
     print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
     env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
-    repo_url = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
+    
     newly_invited = set()
 
     for username in usernames_to_invite:
         print(f"   - Mengirim undangan ke @{username}...")
-        command = f'gh repo collaborator add {repo_url} {username} -p push'
+        endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
+        command = f"gh api --silent -X PUT -f permission='push' {endpoint}"
         success, result = run_command(command, env=env)
         
         if success:
             print(f"     ✅ Undangan untuk @{username} berhasil dikirim!")
             newly_invited.add(username)
         else:
-            if "is already a collaborator" in result.lower():
+            if "already a collaborator" in result.lower():
                 print(f"     ℹ️  @{username} sudah menjadi kolaborator.")
                 newly_invited.add(username)
             else:
