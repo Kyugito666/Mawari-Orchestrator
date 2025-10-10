@@ -1,4 +1,4 @@
-// orchestrator/src/github.rs - Production-Ready Version (Most Stable Fix)
+// orchestrator/src/github.rs - Production-Ready Version (Final Warning Fix)
 
 use crate::config::State;
 use std::process::{Command, Stdio};
@@ -100,30 +100,6 @@ fn run_gh_command(token: &str, args: &[&str]) -> Result<String, GHError> {
 
 pub fn get_username(token: &str) -> Result<String, GHError> {
     run_gh_command(token, &["api", "user", "--jq", ".login"])
-}
-
-fn stop_codespace(token: &str, name: &str) -> Result<(), GHError> {
-    println!("      Menghentikan '{}'...", name);
-    
-    for attempt in 1..=2 {
-        match run_gh_command_with_timeout(token, &["codespace", "stop", "-c", name], 45) {
-            Ok(_) => {
-                println!("      Berhenti");
-                thread::sleep(Duration::from_secs(3));
-                return Ok(());
-            }
-            Err(e) => {
-                if attempt < 2 {
-                    eprintln!("      Retry stop {}/2...", attempt);
-                    thread::sleep(Duration::from_secs(2));
-                } else {
-                    eprintln!("      Peringatan saat berhenti: {}", e);
-                    return Ok(());
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn delete_codespace(token: &str, name: &str) -> Result<(), GHError> {
