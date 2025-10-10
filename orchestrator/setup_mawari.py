@@ -113,41 +113,68 @@ def convert_files_to_json():
     else:
         print("Pilihan tidak valid.")
 
+# ==========================================================
+# FUNGSI INVITE YANG DIPERBAIKI TOTAL
+# ==========================================================
 def invite_collaborators(config):
     """Opsi 2: Mengundang kolaborator berdasarkan token."""
     print("\n--- Opsi 2: Auto Invite Collaborator & Get Username ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
         print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 terlebih dahulu."); return
+
     tokens = tokens_data['tokens']
     token_cache = load_json_file(TOKEN_CACHE_FILE)
     invited_users = load_lines_from_file(INVITED_USERS_FILE)
     usernames_to_invite = []
+
+    # Fase 1: Validasi token dan kumpulkan username
     for index, token in enumerate(tokens):
-        print(f"\n--- Memproses Token {index + 1}/{len(tokens)} ---")
+        print(f"--- Memvalidasi Token {index + 1}/{len(tokens)} ---")
         username = token_cache.get(token)
         if not username:
             env = os.environ.copy(); env['GH_TOKEN'] = token
             success, result = run_command("gh api user --jq .login", env=env)
             if success:
-                username = result; print(f"     ✅ Token valid untuk @{username}"); token_cache[token] = username
+                username = result; print(f"   ✅ Token valid untuk @{username}"); token_cache[token] = username
             else:
-                print(f"     ⚠️  Token tidak valid. Pesan: {result}"); continue
-        if username and username not in invited_users:
+                print(f"   ⚠️  Token tidak valid. Pesan: {result}"); continue
+        
+        if username and username.lower() not in (u.lower() for u in invited_users) and username.lower() != config['main_account_username'].lower():
             usernames_to_invite.append(username)
+
     save_json_file(TOKEN_CACHE_FILE, token_cache)
+    
     if not usernames_to_invite:
-        print("\n✅ Tidak ada user baru untuk diundang."); return
+        print("\n✅ Tidak ada user baru untuk diundang (semua sudah ada di daftar)."); return
+
+    # Fase 2: Kirim undangan dengan command yang lebih baik
+    print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
     env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
+    repo_url = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
     newly_invited = set()
+
     for username in usernames_to_invite:
-        if username.lower() == config['main_account_username'].lower(): continue
-        command = f"gh api repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username} -f permission=push --silent"
+        print(f"   - Mengirim undangan ke @{username}...")
+        # PERBAIKAN UTAMA: Menggunakan 'gh repo collaborator add'
+        command = f"gh repo collaborator add {repo_url} {username} --permission push"
         success, result = run_command(command, env=env)
-        if success or "already a collaborator" in result.lower():
+        
+        if success:
+            print(f"     ✅ Undangan untuk @{username} berhasil dikirim!")
             newly_invited.add(username)
+        else:
+            # Cek apakah error karena sudah jadi kolaborator
+            if "is already a collaborator" in result.lower():
+                print(f"     ℹ️  @{username} sudah menjadi kolaborator.")
+                newly_invited.add(username) # Tandai juga sebagai "sudah diundang"
+            else:
+                print(f"     ❌ GAGAL mengirim undangan ke @{username}. Pesan Error: {result}")
+        time.sleep(1)
+        
     if newly_invited:
         save_lines_to_file(INVITED_USERS_FILE, newly_invited)
+        print(f"\n✅ {len(newly_invited)} user baru berhasil diproses dan ditambahkan ke daftar undangan.")
 
 def auto_accept_invitations(config):
     """Opsi 3: Menerima undangan kolaborasi."""
