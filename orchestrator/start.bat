@@ -1,8 +1,8 @@
 @echo off
 title MAWARI ORCHESTRATOR
 
-REM ## Ganti PATH di bawah ini dengan path ke folder 'orchestrator' Anda ##
-set "ORCHESTRATOR_PATH=C:\path\to\your\Mawari-Orchestrator\orchestrator"
+REM ## Path sudah di-set sesuai permintaan ##
+set "ORCHESTRATOR_PATH=D:\SC\MyProject\Mawari-Orchestrator\orchestrator"
 cd /d "%ORCHESTRATOR_PATH%"
 
 REM ## Muat konfigurasi dari file JSON dan HAPUS SPASI ##
@@ -29,3 +29,4 @@ cargo run --release -- "%REPO_FULL_NAME%"
 echo.
 echo Orkestrator dihentikan. Tekan tombol apa saja untuk keluar.
 pause > nul
+
