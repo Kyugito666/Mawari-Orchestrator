@@ -13,6 +13,50 @@ SECRETS_FILE = 'secrets_mawari.json'
 TOKEN_CACHE_FILE = 'token_cache_mawari.json'
 INVITED_USERS_FILE = 'invited_users_mawari.txt'
 
+# ==========================================================
+# BAGIAN YANG HILANG - FUNGSI HELPER
+# ==========================================================
+def run_command(command, env=None, input_data=None):
+    """Menjalankan perintah shell dan mengembalikan (status, output)."""
+    try:
+        process = subprocess.run(
+            command, shell=True, check=True, capture_output=True,
+            text=True, encoding='utf-8', env=env, input=input_data
+        )
+        return (True, process.stdout.strip())
+    except subprocess.CalledProcessError as e:
+        return (False, f"{e.stdout.strip()} {e.stderr.strip()}")
+
+def load_json_file(filename):
+    """Memuat data dari file JSON."""
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_json_file(filename, data):
+    """Menyimpan data ke file JSON."""
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def load_lines_from_file(filename):
+    """Memuat baris dari file teks ke dalam sebuah set."""
+    try:
+        with open(filename, 'r') as f:
+            return {line.strip() for line in f if line.strip()}
+    except FileNotFoundError:
+        return set()
+
+def save_lines_to_file(filename, lines):
+    """Menambahkan baris baru ke file teks."""
+    with open(filename, 'a') as f:
+        for line in lines:
+            f.write(f"{line}\n")
+# ==========================================================
+# AKHIR BAGIAN YANG HILANG
+# ==========================================================
+
 def load_setup_config():
     """Memuat konfigurasi utama dari config_setup.json"""
     try:
@@ -21,64 +65,149 @@ def load_setup_config():
     except (FileNotFoundError, json.JSONDecodeError):
         print(f"❌ FATAL: File '{CONFIG_FILE}' tidak ditemukan atau formatnya salah.")
         print("Pastikan file tersebut ada dan berisi 'main_account_username', 'main_token', dan 'blueprint_repo_name'.")
-        sys.exit(1) # Keluar dari script jika config tidak ada
-
-# (Fungsi-fungsi lain seperti run_command, load_json_file, dll. tetap sama)
-# ...
-# ... (copy-paste fungsi run_command, load_json_file, save_json_file, 
-#      load_lines_from_file, save_lines_to_file dari script lama ke sini)
-# ...
+        sys.exit(1)
 
 def invite_collaborators(config):
     """Opsi 1: Mengundang kolaborator berdasarkan token."""
     print("\n--- Opsi 1: Auto Invite Collaborator & Get Username ---\n")
-    # ... (sisa kodenya sama persis, tapi variabelnya diambil dari 'config')
+    tokens_data = load_json_file(TOKENS_FILE)
+    if not tokens_data or 'tokens' not in tokens_data:
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan atau formatnya salah."); return
+
+    tokens = tokens_data['tokens']
+    token_cache = load_json_file(TOKEN_CACHE_FILE)
+    invited_users = load_lines_from_file(INVITED_USERS_FILE)
+    print(f"ℹ️  Ditemukan {len(invited_users)} user yang sudah pernah diundang.")
     
-    # Ganti baris ini:
-    # env = os.environ.copy(); env['GH_TOKEN'] = MAIN_TOKEN_CONFIG
-    # menjadi:
+    usernames_to_invite = []
+    for index, token in enumerate(tokens):
+        print(f"\n--- Memproses Token {index + 1}/{len(tokens)} ---")
+        username = token_cache.get(token)
+        if not username:
+            print("   - Memvalidasi token via API...")
+            env = os.environ.copy(); env['GH_TOKEN'] = token
+            success, result = run_command("gh api user --jq .login", env=env)
+            if success:
+                username = result; print(f"     ✅ Token valid untuk @{username}"); token_cache[token] = username
+            else:
+                print(f"     ⚠️  Token tidak valid. Pesan: {result}"); continue
+        
+        if username and username not in invited_users:
+            usernames_to_invite.append(username)
+            print(f"   - @{username} adalah user baru yang akan diundang.")
+        elif username:
+            print(f"   - @{username} sudah ada di daftar undangan (dilewati).")
+
+    save_json_file(TOKEN_CACHE_FILE, token_cache)
+    print("\n✅ Cache token-username telah diperbarui.")
+
+    if not usernames_to_invite:
+        print("\n✅ Tidak ada user baru untuk diundang."); return
+
+    print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
     env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
-    
-    # Ganti baris ini:
-    # if username.lower() == MAIN_ACCOUNT_USERNAME.lower(): continue
-    # menjadi:
-    if username.lower() == config['main_account_username'].lower(): continue
-    
-    # Ganti baris ini:
-    # command = f"gh api repos/{MAIN_ACCOUNT_USERNAME}/{BLUEPRINT_REPO_NAME}/collaborators/{username} -f permission=push --silent"
-    # menjadi:
-    command = f"gh api repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username} -f permission=push --silent"
-    
-    # ... (sisa logika di fungsi ini tetap sama)
+    newly_invited = set()
+
+    for username in usernames_to_invite:
+        if username.lower() == config['main_account_username'].lower(): continue
+        print(f"   - Mengirim undangan ke @{username}...")
+        command = f"gh api repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username} -f permission=push --silent"
+        success, result = run_command(command, env=env)
+        if success:
+            print("     ✅ Undangan berhasil dikirim!"); newly_invited.add(username)
+        elif "already a collaborator" in result.lower():
+            print("     ℹ️  Sudah menjadi kolaborator."); newly_invited.add(username)
+        else:
+            print(f"     ⚠️  Gagal. Pesan: {result}")
+        time.sleep(1)
+        
+    if newly_invited:
+        save_lines_to_file(INVITED_USERS_FILE, newly_invited)
+        print(f"\n✅ {len(newly_invited)} user baru berhasil ditambahkan ke tracking file {INVITED_USERS_FILE}.")
+
 
 def auto_set_secrets(config):
     """Opsi 2: Sinkronisasi secrets ke semua akun."""
-    # ... (logikanya sama, tapi variabelnya diambil dari 'config')
+    print("\n--- Opsi 2: Auto Set Secrets untuk Mawari ---\n")
+    secrets_to_set = load_json_file(SECRETS_FILE)
+    if not secrets_to_set:
+        print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan atau kosong."); return
+    print(f"✅ Berhasil memuat secrets dari {SECRETS_FILE}.")
 
-    # Ganti baris ini:
-    # repo_full_name = f"{username}/{BLUEPRINT_REPO_NAME}"
-    # menjadi:
-    repo_full_name = f"{username}/{config['blueprint_repo_name']}"
+    tokens_data = load_json_file(TOKENS_FILE)
+    if not tokens_data or 'tokens' not in tokens_data: return
+    tokens = tokens_data['tokens']
+    
+    token_cache = load_json_file(TOKEN_CACHE_FILE)
+    if not token_cache:
+        print("⚠️ Cache token tidak ditemukan. Jalankan Opsi 1 terlebih dahulu."); return
 
-    # Ganti baris ini:
-    # success, _ = run_command(f"gh repo fork {MAIN_ACCOUNT_USERNAME}/{BLUEPRINT_REPO_NAME} --clone=false --remote=false", env=env)
-    # menjadi:
-    success, _ = run_command(f"gh repo fork {config['main_account_username']}/{config['blueprint_repo_name']} --clone=false --remote=false", env=env)
-    # ... (sisa logika di fungsi ini tetap sama)
+    for index, token in enumerate(tokens):
+        print(f"\n--- Memproses Akun {index + 1}/{len(tokens)} ---")
+        username = token_cache.get(token)
+        if not username: 
+            print("   - Username tidak ada di cache. Jalankan Opsi 1 untuk update. Dilewati."); continue
+            
+        repo_full_name = f"{username}/{config['blueprint_repo_name']}"
+        print(f"   - Target Repositori: {repo_full_name}")
+
+        env = os.environ.copy(); env['GH_TOKEN'] = token
+        
+        print(f"   - Memeriksa fork...")
+        success, _ = run_command(f"gh repo view {repo_full_name}", env=env)
+        if not success:
+            print(f"     - Fork tidak ditemukan. Membuat fork dari {config['main_account_username']}/{config['blueprint_repo_name']}..."); 
+            run_command(f"gh repo fork {config['main_account_username']}/{config['blueprint_repo_name']} --clone=false --remote=false", env=env)
+            time.sleep(5)
+        else:
+            print("     - Fork sudah ada.")
+
+        for name, value in secrets_to_set.items():
+            if name.startswith("COMMENT_") or name.startswith("NOTE"): continue
+            print(f"   - Mengatur secret '{name}'...")
+            command = f'gh secret set {name} --app codespaces --repo "{repo_full_name}"'
+            success, result = run_command(command, env=env, input_data=str(value)) # Pastikan value adalah string
+            if success: print(f"     ✅ Secret '{name}' berhasil diatur.")
+            else: print(f"     ⚠️  Gagal mengatur secret '{name}'. Pesan: {result}")
+        time.sleep(1)
 
 def auto_accept_invitations(config):
     """Opsi 3: Menerima undangan kolaborasi."""
-    # ... (logikanya sama, tapi variabelnya diambil dari 'config')
-
-    # Ganti baris ini:
-    # target_repo = f"{MAIN_ACCOUNT_USERNAME}/{BLUEPRINT_REPO_NAME}".lower()
-    # menjadi:
+    print("\n--- Opsi 3: Auto Accept Collaboration Invitations ---\n")
+    tokens_data = load_json_file(TOKENS_FILE)
+    if not tokens_data or 'tokens' not in tokens_data: return
+    tokens = tokens_data['tokens']
     target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
-    # ... (sisa logika di fungsi ini tetap sama)
+
+    for index, token in enumerate(tokens):
+        print(f"\n--- Memproses Akun {index + 1}/{len(tokens)} ---")
+        env = os.environ.copy(); env['GH_TOKEN'] = token
+        success, username = run_command("gh api user --jq .login", env=env)
+        if not success:
+            print("   - ⚠️ Token tidak valid, dilewati."); continue
+        print(f"   - Login sebagai @{username}")
+        print("   - Mengecek undangan...")
+        success, invitations_json = run_command("gh api /user/repository_invitations", env=env)
+        if not success:
+            print("     - ⚠️ Gagal mendapatkan daftar undangan."); continue
+        try:
+            invitations = json.loads(invitations_json)
+            if not invitations:
+                print("     - ✅ Tidak ada undangan yang tertunda."); continue
+            for inv in invitations:
+                inv_id = inv.get("id"); repo_name = inv.get("repository", {}).get("full_name", "").lower()
+                if repo_name == target_repo:
+                    print(f"     - Ditemukan undangan untuk {repo_name}. Menerima..."); 
+                    accept_cmd = f"gh api --method PATCH /user/repository_invitations/{inv_id} --silent"
+                    success, result = run_command(accept_cmd, env=env)
+                    if success: print("       ✅ Undangan berhasil diterima!")
+                    else: print(f"       ⚠️ Gagal menerima undangan. Pesan: {result}")
+        except (json.JSONDecodeError, AttributeError):
+            print("     - ⚠️ Gagal mem-parsing daftar undangan atau tidak ada undangan.")
+        time.sleep(1)
 
 def main():
     """Fungsi utama untuk menjalankan setup tool."""
-    # Muat konfigurasi di awal
     config = load_setup_config()
     print(f"✅ Konfigurasi berhasil dimuat untuk repo: {config['blueprint_repo_name']}")
 
