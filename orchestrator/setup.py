@@ -12,6 +12,8 @@ TOKENS_FILE = 'config/tokens.json'
 SECRETS_FILE = 'config/secrets.json'
 TOKEN_CACHE_FILE = 'config/token_cache.json'
 INVITED_USERS_FILE = 'config/invited_users.txt'
+ACCEPTED_USERS_FILE = 'config/accepted_users.txt'
+SECRETS_SET_FILE = 'config/secrets_set.txt'
 STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
@@ -239,22 +241,38 @@ def auto_accept_invitations(config):
         print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan."); return
     
     tokens = tokens_data.get('tokens', [])
+    token_cache = load_json_file(TOKEN_CACHE_FILE)
+    accepted_users = load_lines_from_file(ACCEPTED_USERS_FILE)  # Load riwayat
     target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
     
     accepted_count = 0
     already_member = 0
     no_invitation = 0
+    skipped_count = 0
     
-    print(f"🎯 Target Repo: {target_repo}\n")
+    print(f"🎯 Target Repo: {target_repo}")
+    print(f"📋 {len(accepted_users)} user sudah pernah diproses sebelumnya\n")
     
     for index, token in enumerate(tokens):
-        env = os.environ.copy(); env['GH_TOKEN'] = token
-        success, username = run_command("gh api user --jq .login", env=env)
-        if not success: 
-            print(f"[{index + 1}/{len(tokens)}] ❌ Token tidak valid")
+        username = token_cache.get(token)
+        if not username:
+            env = os.environ.copy(); env['GH_TOKEN'] = token
+            success, result = run_command("gh api user --jq .login", env=env)
+            if not success: 
+                print(f"[{index + 1}/{len(tokens)}] ❌ Token tidak valid")
+                continue
+            username = result
+            token_cache[token] = username
+        
+        # Skip jika sudah pernah diproses
+        if username.lower() in (u.lower() for u in accepted_users):
+            print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Sudah diproses sebelumnya (skip)")
+            skipped_count += 1
+            time.sleep(0.3)
             continue
         
         print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...", end=" ")
+        env = os.environ.copy(); env['GH_TOKEN'] = token
         
         # Cek apakah sudah menjadi kolaborator
         check_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
@@ -263,6 +281,9 @@ def auto_accept_invitations(config):
         if is_collaborator:
             print("✅ Sudah menjadi kolaborator")
             already_member += 1
+            # Simpan ke riwayat
+            save_lines_to_file(ACCEPTED_USERS_FILE, [username])
+            accepted_users.add(username)
             time.sleep(0.5)
             continue
         
@@ -286,6 +307,9 @@ def auto_accept_invitations(config):
                     if accept_success:
                         print("✅ Undangan diterima!")
                         accepted_count += 1
+                        # Simpan ke riwayat
+                        save_lines_to_file(ACCEPTED_USERS_FILE, [username])
+                        accepted_users.add(username)
                     else:
                         print(f"❌ Gagal accept ({accept_result[:30]}...)")
                     break
@@ -299,10 +323,14 @@ def auto_accept_invitations(config):
         
         time.sleep(1)
     
+    # Simpan token cache
+    save_json_file(TOKEN_CACHE_FILE, token_cache)
+    
     print(f"\n{'='*50}")
     print(f"📊 Summary:")
     print(f"   ✅ Undangan diterima: {accepted_count}")
     print(f"   👥 Sudah kolaborator: {already_member}")
+    print(f"   ⏭️  Dilewati (sudah diproses): {skipped_count}")
     print(f"   ℹ️  Tidak ada undangan: {no_invitation}")
     print(f"{'='*50}")
 
@@ -315,19 +343,30 @@ def auto_set_secrets(config):
     tokens_data = load_json_file(TOKENS_FILE)
     tokens = tokens_data.get('tokens', [])
     token_cache = load_json_file(TOKEN_CACHE_FILE)
+    secrets_set_users = load_lines_from_file(SECRETS_SET_FILE)  # Load riwayat
     
     # Hitung jumlah secrets yang akan diatur (exclude COMMENT_ dan NOTE)
     actual_secrets = {k: v for k, v in secrets_to_set.items() if not k.startswith("COMMENT_") and not k.startswith("NOTE")}
     
     print(f"📝 Akan mengatur {len(actual_secrets)} secrets ke user settings setiap akun")
-    print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}\n")
+    print(f"🎯 Target repo: {config['main_account_username']}/{config['blueprint_repo_name']}")
+    print(f"📋 {len(secrets_set_users)} user sudah pernah diproses sebelumnya\n")
     
     # Get repo ID untuk selected repositories
     main_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
+    skipped_count = 0
     
     for index, token in enumerate(tokens):
         username = token_cache.get(token)
         if not username: continue
+        
+        # Skip jika sudah pernah di-set secrets
+        if username.lower() in (u.lower() for u in secrets_set_users):
+            print(f"[{index + 1}/{len(tokens)}] ⏭️  @{username} - Secrets sudah di-set sebelumnya (skip)")
+            skipped_count += 1
+            time.sleep(0.3)
+            continue
+        
         print(f"[{index + 1}/{len(tokens)}] Memproses @{username}...")
         
         env = os.environ.copy(); env['GH_TOKEN'] = token
@@ -368,11 +407,22 @@ def auto_set_secrets(config):
             else:
                 print(f"⚠️ Secret dibuat tapi gagal add repo access")
         
-        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets\n")
+        print(f"   📊 Berhasil: {success_count}/{len(actual_secrets)} secrets")
+        
+        # Jika berhasil set semua secrets, simpan ke riwayat
+        if success_count == len(actual_secrets):
+            save_lines_to_file(SECRETS_SET_FILE, [username])
+            secrets_set_users.add(username)
+            print(f"   ✅ User ditandai sebagai selesai\n")
+        else:
+            print(f"   ⚠️  Tidak semua secrets berhasil, tidak ditandai selesai\n")
+        
         time.sleep(1)
     
     print(f"{'='*50}")
-    print(f"✅ Proses selesai untuk {len(tokens)} akun")
+    print(f"✅ Proses selesai!")
+    print(f"   📝 Diproses: {len(tokens) - skipped_count} akun")
+    print(f"   ⏭️  Dilewati: {skipped_count} akun")
     print(f"{'='*50}")
 
 def auto_follow_and_star(config):
