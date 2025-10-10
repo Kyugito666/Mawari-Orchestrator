@@ -15,14 +15,14 @@ INVITED_USERS_FILE = 'config/invited_users_mawari.txt'
 STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
-# FUNGSI HELPER (DENGAN PERBAIKAN)
+# FUNGSI HELPER (Lengkap dan Sudah Diperbaiki)
 # ==========================================================
-def run_command(command, env=None, input=None): # <-- PERBAIKAN DI SINI
+def run_command(command, env=None, input=None):
     """Menjalankan perintah shell dan mengembalikan (status, output)."""
     try:
         process = subprocess.run(
             command, shell=True, check=True, capture_output=True,
-            text=True, encoding='utf-8', env=env, input=input # <-- PERBAIKAN DI SINI
+            text=True, encoding='utf-8', env=env, input=input
         )
         return (True, process.stdout.strip())
     except subprocess.CalledProcessError as e:
@@ -65,15 +65,15 @@ def load_setup_config():
         sys.exit(1)
 
 # ==========================================================
-# FITUR-FITUR UTAMA
+# FITUR-FITUR UTAMA (Urutan Sudah Benar)
 # ==========================================================
 
 def convert_files_to_json():
+    """Opsi 1: Konversi file .txt (Token atau Owner) ke format .json."""
     print("\n--- Opsi 1: Konversi Data dari .txt ke .json ---")
     print("1. Konversi Token (dari tokens.txt -> tokens_mawari.json)")
     print("2. Konversi Owner Address (dari owners.txt -> secrets_mawari.json)")
     choice = input("Pilih jenis konversi (1/2): ")
-
     if choice == '1':
         try:
             txt_filename = input("Masukkan nama file .txt berisi token (default: tokens.txt): ") or "tokens.txt"
@@ -89,7 +89,6 @@ def convert_files_to_json():
             print(f"❌ GAGAL: File '{txt_filename}' tidak ditemukan di folder 'orchestrator/'.")
         except Exception as e:
             print(f"❌ GAGAL: Terjadi error. Pesan: {e}")
-
     elif choice == '2':
         try:
             txt_filename = input("Masukkan nama file .txt berisi owner address (default: owners.txt): ") or "owners.txt"
@@ -115,10 +114,11 @@ def convert_files_to_json():
         print("Pilihan tidak valid.")
 
 def invite_collaborators(config):
+    """Opsi 2: Mengundang kolaborator berdasarkan token."""
     print("\n--- Opsi 2: Auto Invite Collaborator & Get Username ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
-        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan atau formatnya salah. Jalankan Opsi 1 terlebih dahulu."); return
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 terlebih dahulu."); return
     tokens = tokens_data['tokens']
     token_cache = load_json_file(TOKEN_CACHE_FILE)
     invited_users = load_lines_from_file(INVITED_USERS_FILE)
@@ -149,8 +149,33 @@ def invite_collaborators(config):
     if newly_invited:
         save_lines_to_file(INVITED_USERS_FILE, newly_invited)
 
+def auto_accept_invitations(config):
+    """Opsi 3: Menerima undangan kolaborasi."""
+    print("\n--- Opsi 3: Auto Accept Collaboration Invitations ---\n")
+    tokens_data = load_json_file(TOKENS_FILE)
+    if not tokens_data or 'tokens' not in tokens_data: return
+    tokens = tokens_data.get('tokens', [])
+    target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
+    for index, token in enumerate(tokens):
+        env = os.environ.copy(); env['GH_TOKEN'] = token
+        success, username = run_command("gh api user --jq .login", env=env)
+        if not success: continue
+        print(f"--- Memproses Akun @{username} ({index + 1}/{len(tokens)}) ---")
+        success, invitations_json = run_command("gh api /user/repository_invitations", env=env)
+        if not success: continue
+        try:
+            invitations = json.loads(invitations_json)
+            for inv in invitations:
+                if inv.get("repository", {}).get("full_name", "").lower() == target_repo:
+                    accept_cmd = f"gh api --method PATCH /user/repository_invitations/{inv.get('id')} --silent"
+                    run_command(accept_cmd, env=env)
+                    print(f"   ✅ Undangan untuk {target_repo} diterima.")
+        except (json.JSONDecodeError, AttributeError): continue
+        time.sleep(1)
+
 def auto_set_secrets(config):
-    print("\n--- Opsi 3: Auto Set Secrets untuk Mawari ---\n")
+    """Opsi 4: Sinkronisasi secrets ke semua akun."""
+    print("\n--- Opsi 4: Auto Set Secrets untuk Mawari ---\n")
     secrets_to_set = load_json_file(SECRETS_FILE)
     if not secrets_to_set:
         print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan."); return
@@ -160,43 +185,27 @@ def auto_set_secrets(config):
     for index, token in enumerate(tokens):
         username = token_cache.get(token)
         if not username: continue
+        print(f"\n--- Memproses Akun @{username} ({index + 1}/{len(tokens)}) ---")
         repo_full_name = f"{username}/{config['blueprint_repo_name']}"
         env = os.environ.copy(); env['GH_TOKEN'] = token
         success, _ = run_command(f"gh repo view {repo_full_name}", env=env)
         if not success:
+            print(f"   - Fork tidak ditemukan. Membuat fork...")
             run_command(f"gh repo fork {config['main_account_username']}/{config['blueprint_repo_name']} --clone=false --remote=false", env=env)
             time.sleep(5)
         for name, value in secrets_to_set.items():
             if name.startswith("COMMENT_") or name.startswith("NOTE"): continue
+            print(f"   - Mengatur secret '{name}'...")
             command = f'gh secret set {name} --app codespaces --repo "{repo_full_name}"'
-            run_command(command, env=env, input=str(value)) # <-- PERBAIKAN DI SINI
-        time.sleep(1)
-
-def auto_accept_invitations(config):
-    print("\n--- Opsi 4: Auto Accept Collaboration Invitations ---\n")
-    tokens_data = load_json_file(TOKENS_FILE)
-    tokens = tokens_data.get('tokens', [])
-    target_repo = f"{config['main_account_username']}/{config['blueprint_repo_name']}".lower()
-    for index, token in enumerate(tokens):
-        env = os.environ.copy(); env['GH_TOKEN'] = token
-        success, username = run_command("gh api user --jq .login", env=env)
-        if not success: continue
-        success, invitations_json = run_command("gh api /user/repository_invitations", env=env)
-        if not success: continue
-        try:
-            invitations = json.loads(invitations_json)
-            for inv in invitations:
-                if inv.get("repository", {}).get("full_name", "").lower() == target_repo:
-                    accept_cmd = f"gh api --method PATCH /user/repository_invitations/{inv.get('id')} --silent"
-                    run_command(accept_cmd, env=env)
-        except (json.JSONDecodeError, AttributeError): continue
+            run_command(command, env=env, input=str(value))
         time.sleep(1)
 
 def auto_follow_and_star(config):
+    """Opsi 5: Follow akun utama dan star repositori dari daftar."""
     print("\n--- Opsi 5: Auto Follow & Multi-Repo Star ---\n")
     tokens_data = load_json_file(TOKENS_FILE)
     if not tokens_data or 'tokens' not in tokens_data:
-        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan. Jalankan Opsi 1 atau 2 terlebih dahulu."); return
+        print(f"❌ FATAL: {TOKENS_FILE} tidak ditemukan."); return
     tokens = tokens_data['tokens']
     main_user = config['main_account_username']
     print(f"--- 1. Memulai Auto-Follow ke @{main_user} ---")
@@ -204,9 +213,7 @@ def auto_follow_and_star(config):
         print(f"   - Menggunakan Token {index + 1}/{len(tokens)}...")
         env = os.environ.copy(); env['GH_TOKEN'] = token
         command = f"gh api --method PUT /user/following/{main_user} --silent"
-        success, result = run_command(command, env=env)
-        if success: print(f"     ✅ Berhasil follow @{main_user}")
-        else: print(f"     ⚠️  Gagal follow atau sudah follow.")
+        run_command(command, env=env)
         time.sleep(1)
 
     print(f"\n--- 2. Memulai Auto-Star dari {STAR_REPOS_FILE} ---")
@@ -214,19 +221,16 @@ def auto_follow_and_star(config):
         with open(STAR_REPOS_FILE, 'r') as f:
             repos_to_star = [line.strip() for line in f if line.strip()]
         if not repos_to_star:
-            print(f"⚠️  File '{STAR_REPOS_FILE}' kosong. Tidak ada repo untuk di-star."); return
+            print(f"⚠️  File '{STAR_REPOS_FILE}' kosong."); return
     except FileNotFoundError:
-        print(f"❌ GAGAL: File '{STAR_REPOS_FILE}' tidak ditemukan di folder 'orchestrator/'."); return
+        print(f"❌ GAGAL: File '{STAR_REPOS_FILE}' tidak ditemukan."); return
 
     for repo in repos_to_star:
         print(f"\n   - Menargetkan Repositori: {repo}")
         for index, token in enumerate(tokens):
-            print(f"     - Menggunakan Token {index + 1}/{len(tokens)}...")
             env = os.environ.copy(); env['GH_TOKEN'] = token
             command = f"gh repo star {repo}"
-            success, result = run_command(command, env=env)
-            if success: print(f"       ✅ Berhasil star {repo}")
-            else: print(f"       ⚠️  Gagal star atau sudah star.")
+            run_command(command, env=env)
             time.sleep(1)
 
 def main():
@@ -239,16 +243,16 @@ def main():
         print("=============================================")
         print("1. Konversi dari .txt ke .json (Token/Owner)")
         print("2. Validasi & Undang Kolaborator Baru")
-        print("3. Auto Set Secrets (dengan Pengecekan)")
-        print("4. Auto Accept Invitations")
+        print("3. Auto Accept Invitations (Jalankan setelah menu 2)")
+        print("4. Auto Set Secrets (Jalankan setelah menu 3)")
         print("5. Auto Follow Akun Utama & Star Repositori")
         print("---------------------------------------------")
         print("0. Keluar")
         choice = input("Pilih menu (1/2/3/4/5/0): ")
         if choice == '1': convert_files_to_json()
         elif choice == '2': invite_collaborators(config)
-        elif choice == '3': auto_set_secrets(config)
-        elif choice == '4': auto_accept_invitations(config)
+        elif choice == '3': auto_accept_invitations(config)
+        elif choice == '4': auto_set_secrets(config)
         elif choice == '5': auto_follow_and_star(config)
         elif choice == '0':
             print("Terima kasih!"); break
