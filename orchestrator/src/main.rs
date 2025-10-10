@@ -160,7 +160,7 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("❌ FATAL: {}", e);
-            eprintln!("   Buat config/tokens.json dengan token GitHub Anda");
+            eprintln!("   Pastikan 'orchestrator/config/tokens.json' ada dan formatnya benar.");
             return;
         }
     };
