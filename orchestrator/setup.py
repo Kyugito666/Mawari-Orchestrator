@@ -17,26 +17,55 @@ STAR_REPOS_FILE = 'star_repos.txt'
 # ==========================================================
 # FUNGSI HELPER (Lengkap dengan Retry Koneksi)
 # ==========================================================
-def run_command(command, env=None, input=None):
+def run_command(command, env=None, input=None, max_retries=3):
     """Menjalankan perintah dengan mekanisme retry untuk masalah koneksi."""
-    retry_delay = 60  # Jeda dalam detik sebelum mencoba lagi
-    while True:
+    retry_delay = 30  # Jeda dalam detik sebelum mencoba lagi
+    retry_count = 0
+    
+    while retry_count < max_retries:
         try:
             process = subprocess.run(
                 command, shell=True, check=True, capture_output=True,
-                text=True, encoding='utf-8', env=env, input=input
+                text=True, encoding='utf-8', env=env, input=input, timeout=30
             )
             return (True, process.stdout.strip())
-        except subprocess.CalledProcessError as e:
-            error_message = f"{e.stdout.strip()} {e.stderr.strip()}"
-            
-            if "connecting to api.github.com" in error_message or "could not resolve host" in error_message.lower():
-                print(f"     ❌ KONEKSI GAGAL. Mencoba lagi dalam {retry_delay} detik...")
+        except subprocess.TimeoutExpired:
+            retry_count += 1
+            if retry_count < max_retries:
+                print(f"     ⏱️  TIMEOUT. Percobaan {retry_count}/{max_retries}. Mencoba lagi dalam {retry_delay} detik...")
                 time.sleep(retry_delay)
-                print("     🔄 Mencoba ulang perintah...")
-                continue # Kembali ke awal loop untuk mencoba lagi
+                continue
+            else:
+                return (False, "Command timeout after multiple retries")
+        except subprocess.CalledProcessError as e:
+            error_message = f"{e.stdout.strip()} {e.stderr.strip()}".lower()
+            
+            # Cek apakah error karena koneksi
+            connection_errors = [
+                "connecting to api.github.com",
+                "could not resolve host",
+                "tls handshake timeout",
+                "connection reset",
+                "connection timed out",
+                "network is unreachable",
+                "temporary failure in name resolution"
+            ]
+            
+            is_connection_error = any(err in error_message for err in connection_errors)
+            
+            if is_connection_error:
+                retry_count += 1
+                if retry_count < max_retries:
+                    print(f"     ❌ KONEKSI GAGAL. Percobaan {retry_count}/{max_retries}. Mencoba lagi dalam {retry_delay} detik...")
+                    time.sleep(retry_delay)
+                    print("     🔄 Mencoba ulang perintah...")
+                    continue
+                else:
+                    return (False, f"Connection failed after {max_retries} retries: {error_message}")
             else:
                 return (False, error_message.strip())
+    
+    return (False, "Max retries exceeded")
 
 def load_json_file(filename):
     """Memuat data dari file JSON."""
@@ -135,6 +164,7 @@ def invite_collaborators(config):
     invited_users = load_lines_from_file(INVITED_USERS_FILE)
     usernames_to_invite = []
 
+    # Validasi dan kumpulkan username
     for index, token in enumerate(tokens):
         print(f"--- Memvalidasi Token {index + 1}/{len(tokens)} ---")
         username = token_cache.get(token)
@@ -159,26 +189,47 @@ def invite_collaborators(config):
     
     newly_invited = set()
 
-    for username in usernames_to_invite:
-        print(f"   - Mengirim undangan ke @{username}...")
-        endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
-        command = f"gh api --silent -X PUT -f permission='push' {endpoint}"
-        success, result = run_command(command, env=env)
+    for idx, username in enumerate(usernames_to_invite, 1):
+        print(f"\n[{idx}/{len(usernames_to_invite)}] Memproses @{username}...")
+        
+        # Cek status kolaborator terlebih dahulu
+        check_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
+        check_command = f"gh api {check_endpoint}"
+        is_collaborator, _ = run_command(check_command, env=env)
+        
+        if is_collaborator:
+            print(f"     ℹ️  @{username} sudah menjadi kolaborator (skip invite).")
+            newly_invited.add(username)
+            # Langsung simpan ke file
+            save_lines_to_file(INVITED_USERS_FILE, [username])
+            time.sleep(0.5)
+            continue
+        
+        # Kirim undangan
+        print(f"     📤 Mengirim undangan...")
+        invite_endpoint = f"repos/{config['main_account_username']}/{config['blueprint_repo_name']}/collaborators/{username}"
+        invite_command = f"gh api --silent -X PUT -f permission='push' {invite_endpoint}"
+        success, result = run_command(invite_command, env=env)
         
         if success:
-            print(f"     ✅ Undangan untuk @{username} berhasil dikirim!")
+            print(f"     ✅ Undangan berhasil dikirim!")
             newly_invited.add(username)
+            # Langsung simpan ke file setelah berhasil
+            save_lines_to_file(INVITED_USERS_FILE, [username])
         else:
             if "already a collaborator" in result.lower():
                 print(f"     ℹ️  @{username} sudah menjadi kolaborator.")
                 newly_invited.add(username)
+                save_lines_to_file(INVITED_USERS_FILE, [username])
             else:
-                print(f"     ❌ GAGAL mengirim undangan ke @{username}. Pesan Error: {result}")
+                print(f"     ❌ GAGAL mengirim undangan. Pesan Error: {result}")
+                print(f"     ⚠️  User @{username} akan dilewati dan tidak ditambahkan ke daftar.")
+        
         time.sleep(1)
         
-    if newly_invited:
-        save_lines_to_file(INVITED_USERS_FILE, newly_invited)
-        print(f"\n✅ {len(newly_invited)} user baru berhasil diproses dan ditambahkan ke daftar undangan.")
+    print(f"\n{'='*50}")
+    print(f"✅ Proses selesai! {len(newly_invited)} user berhasil diproses.")
+    print(f"{'='*50}")
 
 def auto_accept_invitations(config):
     """Opsi 3: Menerima undangan kolaborasi."""
