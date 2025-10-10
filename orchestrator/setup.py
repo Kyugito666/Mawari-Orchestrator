@@ -1,4 +1,4 @@
-# orchestrator/setup_mawari.py
+# orchestrator/setup.py
 
 import json
 import subprocess
@@ -6,12 +6,12 @@ import os
 import time
 import sys
 
-# --- Nama File Konfigurasi & Data ---
-CONFIG_FILE = 'config/config_setup.json'
-TOKENS_FILE = 'config/tokens_mawari.json'
-SECRETS_FILE = 'config/secrets_mawari.json'
-TOKEN_CACHE_FILE = 'config/token_cache_mawari.json'
-INVITED_USERS_FILE = 'config/invited_users_mawari.txt'
+# --- Nama File Konfigurasi & Data (SUDAH DISIMPLIFY) ---
+CONFIG_FILE = 'config/setup.json'
+TOKENS_FILE = 'config/tokens.json'
+SECRETS_FILE = 'config/secrets.json'
+TOKEN_CACHE_FILE = 'config/token_cache.json'
+INVITED_USERS_FILE = 'config/invited_users.txt'
 STAR_REPOS_FILE = 'star_repos.txt'
 
 # ==========================================================
@@ -56,7 +56,7 @@ def save_lines_to_file(filename, lines):
             f.write(f"{line}\n")
 
 def load_setup_config():
-    """Memuat konfigurasi utama dari config_setup.json"""
+    """Memuat konfigurasi utama dari setup.json"""
     try:
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
@@ -71,8 +71,8 @@ def load_setup_config():
 def convert_files_to_json():
     """Opsi 1: Konversi file .txt (Token atau Owner) ke format .json."""
     print("\n--- Opsi 1: Konversi Data dari .txt ke .json ---")
-    print("1. Konversi Token (dari tokens.txt -> tokens_mawari.json)")
-    print("2. Konversi Owner Address (dari owners.txt -> secrets_mawari.json)")
+    print("1. Konversi Token (dari tokens.txt -> tokens.json)")
+    print("2. Konversi Owner Address (dari owners.txt -> secrets.json)")
     choice = input("Pilih jenis konversi (1/2): ")
     if choice == '1':
         try:
@@ -151,9 +151,6 @@ def invite_collaborators(config):
 
     for username in usernames_to_invite:
         print(f"   - Mengirim undangan ke @{username}...")
-        # ==========================================================
-        # PERBAIKAN FINAL DI SINI
-        # ==========================================================
         command = f'gh repo collaborator add {repo_url} {username} -p push'
         success, result = run_command(command, env=env)
         
@@ -198,7 +195,7 @@ def auto_accept_invitations(config):
 
 def auto_set_secrets(config):
     """Opsi 4: Sinkronisasi secrets ke semua akun."""
-    print("\n--- Opsi 4: Auto Set Secrets untuk Mawari ---\n")
+    print("\n--- Opsi 4: Auto Set Secrets ---\n")
     secrets_to_set = load_json_file(SECRETS_FILE)
     if not secrets_to_set:
         print(f"❌ FATAL: {SECRETS_FILE} tidak ditemukan."); return
@@ -262,7 +259,7 @@ def main():
     print(f"✅ Konfigurasi berhasil dimuat untuk repo: {config['blueprint_repo_name']}")
     while True:
         print("\n=============================================")
-        print("      MAWARI ORCHESTRATOR SETUP TOOL")
+        print("         ORCHESTRATOR SETUP TOOL")
         print("=============================================")
         print("1. Konversi dari .txt ke .json (Token/Owner)")
         print("2. Validasi & Undang Kolaborator Baru")
