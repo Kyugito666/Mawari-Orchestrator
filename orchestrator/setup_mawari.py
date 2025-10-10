@@ -113,9 +113,6 @@ def convert_files_to_json():
     else:
         print("Pilihan tidak valid.")
 
-# ==========================================================
-# FUNGSI INVITE YANG DIPERBAIKI TOTAL
-# ==========================================================
 def invite_collaborators(config):
     """Opsi 2: Mengundang kolaborator berdasarkan token."""
     print("\n--- Opsi 2: Auto Invite Collaborator & Get Username ---\n")
@@ -128,7 +125,6 @@ def invite_collaborators(config):
     invited_users = load_lines_from_file(INVITED_USERS_FILE)
     usernames_to_invite = []
 
-    # Fase 1: Validasi token dan kumpulkan username
     for index, token in enumerate(tokens):
         print(f"--- Memvalidasi Token {index + 1}/{len(tokens)} ---")
         username = token_cache.get(token)
@@ -148,7 +144,6 @@ def invite_collaborators(config):
     if not usernames_to_invite:
         print("\n✅ Tidak ada user baru untuk diundang (semua sudah ada di daftar)."); return
 
-    # Fase 2: Kirim undangan dengan command yang lebih baik
     print(f"\n--- Mengundang {len(usernames_to_invite)} Akun Baru ke Repo ---")
     env = os.environ.copy(); env['GH_TOKEN'] = config['main_token']
     repo_url = f"{config['main_account_username']}/{config['blueprint_repo_name']}"
@@ -156,18 +151,19 @@ def invite_collaborators(config):
 
     for username in usernames_to_invite:
         print(f"   - Mengirim undangan ke @{username}...")
-        # PERBAIKAN UTAMA: Menggunakan 'gh repo collaborator add'
-        command = f"gh repo collaborator add {repo_url} {username} --permission push"
+        # ==========================================================
+        # PERBAIKAN UTAMA DI SINI
+        # ==========================================================
+        command = f'gh repo collaborator add {repo_url} {username} --permission="push"'
         success, result = run_command(command, env=env)
         
         if success:
             print(f"     ✅ Undangan untuk @{username} berhasil dikirim!")
             newly_invited.add(username)
         else:
-            # Cek apakah error karena sudah jadi kolaborator
             if "is already a collaborator" in result.lower():
                 print(f"     ℹ️  @{username} sudah menjadi kolaborator.")
-                newly_invited.add(username) # Tandai juga sebagai "sudah diundang"
+                newly_invited.add(username)
             else:
                 print(f"     ❌ GAGAL mengirim undangan ke @{username}. Pesan Error: {result}")
         time.sleep(1)
