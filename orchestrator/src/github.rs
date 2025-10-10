@@ -1,12 +1,11 @@
-// orchestrator/src/github.rs - Fixed Codespace Creation
+// orchestrator/src/github.rs - Fixed with proper stdout capture
 
 use crate::config::State;
 use std::process::{Command, Stdio};
 use std::fmt;
 use std::thread;
 use std::time::Duration;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{BufRead, BufReader};
 
 #[derive(Debug)]
 pub enum GHError {
@@ -28,87 +27,83 @@ impl fmt::Display for GHError {
 fn run_gh_command_with_timeout(token: &str, args: &[&str], timeout_secs: u64) -> Result<String, GHError> {
     eprintln!("DEBUG: gh {} (timeout: {}s)", args.join(" "), timeout_secs);
     
-    let token_clone = token.to_string();
-    let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    
-    let result = Arc::new(Mutex::new(None));
-    let result_clone = Arc::clone(&result);
-    let completed = Arc::new(AtomicBool::new(false));
-    let completed_clone = Arc::clone(&completed);
-    
-    let handle = thread::spawn(move || {
-        let output = Command::new("gh")
-            .args(&args_vec)
-            .env("GH_TOKEN", &token_clone)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-        
-        if completed_clone.load(Ordering::Relaxed) {
-            return;
-        }
-        
-        let mut res = result_clone.lock().unwrap();
-        *res = Some(output);
+    let mut child = Command::new("gh")
+        .args(args)
+        .env("GH_TOKEN", token)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GHError::CommandError(format!("Gagal spawn gh: {}", e)))?;
+
+    let stdout = child.stdout.take().ok_or_else(|| GHError::CommandError("Stdout tidak tersedia".to_string()))?;
+    let stderr = child.stderr.take().ok_or_else(|| GHError::CommandError("Stderr tidak tersedia".to_string()))?;
+
+    let stdout_reader = BufReader::new(stdout);
+    let stderr_reader = BufReader::new(stderr);
+
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+
+    let stdout_handle = thread::spawn(move || {
+        stdout_reader.lines().filter_map(|line| line.ok()).collect::<Vec<_>>()
     });
-    
-    let timeout_duration = Duration::from_secs(timeout_secs);
+
+    let stderr_handle = thread::spawn(move || {
+        stderr_reader.lines().filter_map(|line| line.ok()).collect::<Vec<_>>()
+    });
+
     let start = std::time::Instant::now();
-    
-    while start.elapsed() < timeout_duration {
-        if handle.is_finished() {
+    let mut timed_out = false;
+
+    loop {
+        if start.elapsed() > Duration::from_secs(timeout_secs) {
+            let _ = child.kill();
+            timed_out = true;
             break;
         }
-        thread::sleep(Duration::from_millis(100));
+
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(GHError::CommandError(format!("Wait error: {}", e))),
+        }
     }
-    
-    if !handle.is_finished() {
-        completed.store(true, Ordering::Relaxed);
+
+    if timed_out {
         return Err(GHError::Timeout(format!("Command timeout setelah {}s", timeout_secs)));
     }
-    
-    let _ = handle.join();
-    
-    let output_result = result.lock().unwrap().take()
-        .ok_or_else(|| GHError::CommandError("Thread result kosong".to_string()))?
-        .map_err(|e| GHError::CommandError(format!("Gagal mengeksekusi gh: {}", e)))?;
 
-    let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
-    let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
-    
-    // Log raw output untuk debugging
-    if !stderr.is_empty() {
-        eprintln!("DEBUG STDERR: {}", stderr.lines().take(3).collect::<Vec<_>>().join(" | "));
+    stdout_lines = stdout_handle.join().unwrap_or_default();
+    stderr_lines = stderr_handle.join().unwrap_or_default();
+
+    let status = child.wait().map_err(|e| GHError::CommandError(format!("Wait failed: {}", e)))?;
+
+    let stdout_text = stdout_lines.join("\n");
+    let stderr_text = stderr_lines.join("\n");
+
+    if !stderr_text.is_empty() {
+        eprintln!("DEBUG STDERR: {}", stderr_text.lines().take(5).collect::<Vec<_>>().join(" | "));
     }
-    if !stdout.is_empty() {
-        eprintln!("DEBUG STDOUT: {}", stdout.lines().take(3).collect::<Vec<_>>().join(" | "));
+    if !stdout_text.is_empty() {
+        eprintln!("DEBUG STDOUT: {}", stdout_text.lines().take(5).collect::<Vec<_>>().join(" | "));
     }
-    
-    if !output_result.status.success() {
-        if stderr.contains("Bad credentials") 
-            || stderr.contains("authentication required")
-            || stderr.contains("HTTP 401") {
-            return Err(GHError::AuthError(stderr));
+
+    if !status.success() {
+        if stderr_text.contains("Bad credentials") 
+            || stderr_text.contains("authentication required")
+            || stderr_text.contains("HTTP 401")
+            || stderr_text.contains("HTTP 403") {
+            return Err(GHError::AuthError(stderr_text));
         }
-        
-        if stderr.contains("no codespaces found") || (stdout.trim().is_empty() && stderr.trim().is_empty()) {
+
+        if stderr_text.contains("no codespaces found") || (stdout_text.trim().is_empty() && stderr_text.trim().is_empty()) {
             return Ok("".to_string());
         }
-        
-        // Return stderr sebagai error message
-        return Err(GHError::CommandError(if !stderr.is_empty() { stderr } else { stdout }));
+
+        return Err(GHError::CommandError(if !stderr_text.is_empty() { stderr_text } else { stdout_text }));
     }
-    
-    // Beberapa gh command output ke stderr (seperti create), cek keduanya
-    let output = if !stdout.trim().is_empty() {
-        stdout.trim().to_string()
-    } else if !stderr.trim().is_empty() && !stderr.contains("error") && !stderr.contains("failed") {
-        stderr.trim().to_string()
-    } else {
-        stdout.trim().to_string()
-    };
-    
-    Ok(output)
+
+    Ok(stdout_text.trim().to_string())
 }
 
 fn run_gh_command(token: &str, args: &[&str]) -> Result<String, GHError> {
@@ -134,7 +129,7 @@ fn stop_codespace(token: &str, name: &str) -> Result<(), GHError> {
                     eprintln!("      Retry stop {}/2...", attempt);
                     thread::sleep(Duration::from_secs(2));
                 } else {
-                    eprintln!("      Peringatan saat berhenti: {}", e);
+                    eprintln!("      Peringatan saat berhenti: {}", e.to_string().lines().next().unwrap_or("error"));
                     return Ok(());
                 }
             }
@@ -273,45 +268,54 @@ fn create_codespace_with_retry(
     for attempt in 1..=max_retries {
         println!("      Attempt {}/{} untuk membuat '{}'...", attempt, max_retries, display_name);
         
-        // Try WITHOUT --default-permissions first (might not be supported)
+        // Gunakan -R (bukan -r yang deprecated)
         let result = run_gh_command_with_timeout(
             token,
             &[
                 "codespace", "create",
-                "-r", repo,
+                "-R", repo,
                 "-m", "standardLinux32gb",
                 "--display-name", display_name,
-                "--idle-timeout", "240m"
+                "--idle-timeout", "240m",
+                "--default-permissions"
             ],
-            120 // 2 menit untuk create
+            150 // 2.5 menit untuk create
         );
         
         match result {
             Ok(output) if !output.trim().is_empty() => {
                 let name = output.lines().next().unwrap_or(&output).trim();
-                println!("      Berhasil dibuat: {}", name);
-                return Ok(name.to_string());
+                if name.len() > 5 { // Validasi format nama codespace
+                    println!("      ✅ Berhasil dibuat: {}", name);
+                    return Ok(name.to_string());
+                } else {
+                    eprintln!("      ⚠️ Output tidak valid: '{}'", name);
+                }
             }
             Ok(_) => {
-                eprintln!("      Output kosong pada attempt {}", attempt);
-                if attempt < max_retries {
-                    eprintln!("      Retry dalam 10 detik...");
-                    thread::sleep(Duration::from_secs(10));
-                }
+                eprintln!("      ⚠️ Output kosong pada attempt {}", attempt);
             }
             Err(e) => {
-                eprintln!("      Error pada attempt {}: {}", attempt, 
-                    e.to_string().lines().next().unwrap_or("unknown"));
-                if attempt < max_retries {
-                    eprintln!("      Retry dalam 10 detik...");
-                    thread::sleep(Duration::from_secs(10));
+                let err_msg = e.to_string();
+                eprintln!("      ❌ Error pada attempt {}: {}", attempt, 
+                    err_msg.lines().next().unwrap_or("unknown"));
+                
+                // Jika auth error, langsung fail tanpa retry
+                if err_msg.contains("Bad credentials") || err_msg.contains("HTTP 401") || err_msg.contains("HTTP 403") {
+                    return Err(e);
                 }
             }
+        }
+        
+        if attempt < max_retries {
+            let wait_time = 15 * attempt as u64; // Backoff eksponensial
+            eprintln!("      ⏳ Retry dalam {} detik...", wait_time);
+            thread::sleep(Duration::from_secs(wait_time));
         }
     }
     
     Err(GHError::CommandError(format!(
-        "Gagal membuat '{}' setelah {} percobaan (output selalu kosong atau error)",
+        "Gagal membuat '{}' setelah {} percobaan",
         display_name, max_retries
     )))
 }
