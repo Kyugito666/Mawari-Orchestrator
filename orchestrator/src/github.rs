@@ -1,6 +1,5 @@
 // orchestrator/src/github.rs
 
-// Import State struct so the function signature can use it
 use crate::config::State;
 use std::process::Command;
 use std::fmt;
@@ -22,6 +21,7 @@ impl fmt::Display for GHError {
     }
 }
 
+// Helper function to run gh commands robustly
 fn run_gh_command(token: &str, args: &[&str]) -> Result<String, GHError> {
     eprintln!("DEBUG: gh {}", args.join(" "));
     let output = Command::new("gh")
@@ -50,6 +50,7 @@ pub fn get_username(token: &str) -> Result<String, GHError> {
     run_gh_command(token, &["api", "user", "--jq", ".login"])
 }
 
+// Function to stop a codespace
 fn stop_codespace(token: &str, name: &str) -> Result<(), GHError> {
     println!("      Menghentikan '{}'...", name);
     match run_gh_command(token, &["codespace", "stop", "-c", name]) {
@@ -58,22 +59,38 @@ fn stop_codespace(token: &str, name: &str) -> Result<(), GHError> {
     }
 }
 
+// Function to delete a codespace with retries
 fn delete_codespace(token: &str, name: &str) -> Result<(), GHError> {
     println!("      Menghapus '{}'...", name);
-    match run_gh_command(token, &["codespace", "delete", "-c", name, "--force"]) {
-        Ok(_) => { println!("      Berhasil dihapus."); thread::sleep(Duration::from_secs(3)); Ok(()) }
-        Err(e) => { eprintln!("      Gagal menghapus, melanjutkan...: {}", e); Ok(()) }
+    for attempt in 1..=3 {
+        match run_gh_command(token, &["codespace", "delete", "-c", name, "--force"]) {
+            Ok(_) => { println!("      Berhasil dihapus."); thread::sleep(Duration::from_secs(3)); return Ok(()); }
+            Err(_) => {
+                if attempt < 3 { eprintln!("      Retry {}/3", attempt); thread::sleep(Duration::from_secs(5)); } 
+                else { eprintln!("      Gagal menghapus, melanjutkan..."); return Ok(()); }
+            }
+        }
     }
+    Ok(())
 }
 
+// Function to perform a health check by checking for a file inside the codespace
 fn health_check(token: &str, name: &str) -> bool {
+    println!("    -> Health Check untuk '{}'...", name);
     let check_cmd = "test -f /tmp/mawari_auto_start_done && echo 'healthy'";
     match run_gh_command(token, &["codespace", "ssh", "-c", name, "--", check_cmd]) {
-        Ok(output) if output.contains("healthy") => true,
-        _ => false,
+        Ok(output) if output.contains("healthy") => {
+            println!("    ✅ Health check LULUS.");
+            true
+        },
+        _ => {
+            println!("    ❌ Health check GAGAL.");
+            false
+        }
     }
 }
 
+// Function to wait for SSH and run the startup script
 pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, setup_mode: &str) -> Result<(), GHError> {
     println!("   Memverifikasi dan menjalankan node di '{}'...", name);
     
@@ -84,7 +101,7 @@ pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, s
                 println!("      ✅ SSH sudah siap!");
                 let exec_command = format!("bash -l -c 'export SETUP_MODE={} && bash {}'", setup_mode, script_path);
                 
-                println!("      🚀 Menjalankan skrip auto-start (Mode: {}): {}", setup_mode, script_path);
+                println!("      🚀 Menjalankan skrip auto-start (Mode: {})...", setup_mode);
                 match run_gh_command(token, &["codespace", "ssh", "-c", name, "--", &exec_command]) {
                     Ok(_) => { println!("      ✅ Perintah eksekusi skrip berhasil dikirim."); return Ok(()); },
                     Err(e) => { eprintln!("      ⚠️  Peringatan saat eksekusi skrip: {}", e.to_string()); return Ok(()); }
@@ -100,50 +117,59 @@ pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, s
     Err(GHError::CommandError(format!("Timeout: SSH tidak siap untuk '{}'", name)))
 }
 
-// FIX: Function signature now correctly accepts the `state` argument
+// UPGRADED: This function now implements the "Inspect, Health Check & Reuse" strategy
 pub fn ensure_mawari_codespaces(token: &str, repo: &str, state: &State) -> Result<(String, String), GHError> {
-    println!("  Mengecek Codespace Mawari yang ada...");
+    println!("\n  Menerapkan Strategi: Inspect, Health Check & Reuse...");
     
     let mut cs1_name = state.mawari_codespace_name.clone();
     let mut cs2_name = state.nexus_codespace_name.clone();
 
-    let list_output = run_gh_command(token, &["codespace", "list", "--json", "name,repository,state,displayName"])?;
+    // UPGRADED: Using robust list command with jq query from your reference repo
+    let list_output = run_gh_command(token, &["codespace", "list", "--json", "name,repository,state,displayName", "-q", ".[]"])?;
     
-    if !list_output.is_empty() {
-        if let Ok(codespaces) = serde_json::from_str::<Vec<serde_json::Value>>(&list_output) {
-            for cs in codespaces {
-                if cs["repository"].as_str().unwrap_or("") != repo { continue; }
+    let mut found_cs1 = false;
+    let mut found_cs2 = false;
 
+    if !list_output.is_empty() {
+        for line in list_output.lines() {
+            if let Ok(cs) = serde_json::from_str::<serde_json::Value>(line) {
                 let name = cs["name"].as_str().unwrap_or("").to_string();
-                let state = cs["state"].as_str().unwrap_or("").to_string();
+                let cs_repo = cs["repository"]["nameWithOwner"].as_str().unwrap_or("");
+                let cs_state = cs["state"].as_str().unwrap_or("");
                 let display_name = cs["displayName"].as_str().unwrap_or("");
 
-                // FIX: Removed `mut` as it's not needed, silencing the warning.
-                let process_node = |current_name: &mut String, target_display: &str| -> Result<(), GHError> {
-                    if display_name == target_display {
-                        println!("  -> Ditemukan '{}': {} (State: {})", target_display, name, state);
-                        
-                        if state == "Available" && health_check(token, &name) {
-                            println!("    ✅ Health check LULUS. Digunakan kembali.");
-                            *current_name = name.clone();
-                        } else {
-                            println!("    ❌ Health check GAGAL atau state tidak 'Available'. Dibuat ulang...");
-                            if state == "Available" || state == "Running" { stop_codespace(token, &name)?; }
-                            delete_codespace(token, &name)?;
-                        }
-                    }
-                    Ok(())
-                };
+                if cs_repo != repo { continue; } // Skip codespaces from other repos
 
-                process_node(&mut cs1_name, "mawari-nodes-1")?;
-                process_node(&mut cs2_name, "mawari-nodes-2")?;
+                if display_name == "mawari-nodes-1" {
+                    println!("  -> Ditemukan 'mawari-nodes-1': {} (State: {})", name, cs_state);
+                    if cs_state == "Available" && health_check(token, &name) {
+                        cs1_name = name;
+                        found_cs1 = true;
+                    } else {
+                        println!("     Tidak sehat atau state salah. Akan dihapus...");
+                        if cs_state == "Available" || cs_state == "Running" { stop_codespace(token, &name)?; }
+                        delete_codespace(token, &name)?;
+                    }
+                }
+
+                if display_name == "mawari-nodes-2" {
+                    println!("  -> Ditemukan 'mawari-nodes-2': {} (State: {})", name, cs_state);
+                    if cs_state == "Available" && health_check(token, &name) {
+                        cs2_name = name;
+                        found_cs2 = true;
+                    } else {
+                        println!("     Tidak sehat atau state salah. Akan dihapus...");
+                        if cs_state == "Available" || cs_state == "Running" { stop_codespace(token, &name)?; }
+                        delete_codespace(token, &name)?;
+                    }
+                }
             }
         }
     }
 
     let script_path = "/workspaces/Mawari-Orchestrator/mawari/auto-start.sh";
 
-    if cs1_name.is_empty() {
+    if !found_cs1 {
         println!("\n  Membuat codespace 'mawari-nodes-1'...");
         let new_name = run_gh_command(token, &["codespace", "create", "-r", repo, "-m", "standardLinux32gb", "--display-name", "mawari-nodes-1", "--idle-timeout", "240m"])?;
         if new_name.is_empty() { return Err(GHError::CommandError("Gagal membuat codespace mawari-nodes-1".to_string())); }
@@ -153,10 +179,10 @@ pub fn ensure_mawari_codespaces(token: &str, repo: &str, state: &State) -> Resul
         wait_and_run_startup_script(token, &cs1_name, script_path, "PRIMARY")?;
     }
     
-    println!("\n  Menunggu 10 detik sebelum lanjut ke codespace berikutnya...\n");
+    println!("\n  Menunggu 10 detik sebelum lanjut...\n");
     thread::sleep(Duration::from_secs(10));
     
-    if cs2_name.is_empty() {
+    if !found_cs2 {
         println!("\n  Membuat codespace 'mawari-nodes-2'...");
         let new_name = run_gh_command(token, &["codespace", "create", "-r", repo, "-m", "standardLinux32gb", "--display-name", "mawari-nodes-2", "--idle-timeout", "240m"])?;
         if new_name.is_empty() { return Err(GHError::CommandError("Gagal membuat codespace mawari-nodes-2".to_string())); }
