@@ -65,7 +65,7 @@ def load_setup_config():
         sys.exit(1)
 
 # ==========================================================
-# FITUR-FITUR UTAMA (Urutan Sudah Benar)
+# FITUR-FITUR UTAMA
 # ==========================================================
 
 def convert_files_to_json():
@@ -152,9 +152,9 @@ def invite_collaborators(config):
     for username in usernames_to_invite:
         print(f"   - Mengirim undangan ke @{username}...")
         # ==========================================================
-        # PERBAIKAN UTAMA DI SINI
+        # PERBAIKAN FINAL DI SINI
         # ==========================================================
-        command = f'gh repo collaborator add {repo_url} {username} --permission="push"'
+        command = f'gh repo collaborator add {repo_url} {username} -p push'
         success, result = run_command(command, env=env)
         
         if success:
