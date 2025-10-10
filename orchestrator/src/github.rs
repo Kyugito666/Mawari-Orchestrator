@@ -1,4 +1,4 @@
-// orchestrator/src/github.rs - Production-Ready Version (Fixed with latest gh flags)
+// orchestrator/src/github.rs - Production-Ready Version (Fixed with stable flags)
 
 use crate::config::State;
 use std::process::{Command, Stdio};
@@ -317,10 +317,10 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
         println!("  Membuat 'mawari-multi-node-1'...");
         let new_name = run_gh_command(token, &[
             "codespace", "create", 
-            "--repo", repo, 
-            "--machine", "standardLinux32gb",
+            "-r", repo, 
+            "-m", "standardLinux32gb",
             "--display-name", "mawari-multi-node-1", 
-            "--idle-timeout-minutes", "240"
+            "--idle-timeout", "240m"
         ])?;
         
         if new_name.is_empty() { 
@@ -340,10 +340,10 @@ pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Resu
         println!("  Membuat 'mawari-multi-node-2'...");
         let new_name = run_gh_command(token, &[
             "codespace", "create", 
-            "--repo", repo, 
-            "--machine", "standardLinux32gb",
+            "-r", repo, 
+            "-m", "standardLinux32gb",
             "--display-name", "mawari-multi-node-2", 
-            "--idle-timeout-minutes", "240"
+            "--idle-timeout", "240m"
         ])?;
         
         if new_name.is_empty() { 
