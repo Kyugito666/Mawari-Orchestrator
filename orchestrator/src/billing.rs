@@ -1,4 +1,4 @@
-// orchestrator/src/billing.rs - Hardened Version
+// orchestrator/src/billing.rs - Hardened Version (Fixed)
 
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,6 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct BillingInfo {
-    pub total_core_hours_used: f32,
     pub hours_remaining: f32,
     pub is_quota_ok: bool,
 }
@@ -94,18 +93,14 @@ pub fn get_billing_info(token: &str, username: &str) -> Result<BillingInfo, Stri
             let error_preview = e.lines().next().unwrap_or("API error");
             eprintln!("   PERINGATAN: Gagal menghubungi API billing ({})", error_preview);
             
-            // Jika timeout atau network error, kembalikan state "tidak yakin"
             if e.contains("timeout") || e.contains("network") || e.contains("connection") {
                 return Ok(BillingInfo {
-                    total_core_hours_used: 0.0,
                     hours_remaining: 0.0,
                     is_quota_ok: false,
                 });
             }
             
-            // Untuk error lain (misal auth), anggap quota habis
             return Ok(BillingInfo {
-                total_core_hours_used: 999.0,
                 hours_remaining: 0.0,
                 is_quota_ok: false,
             });
@@ -117,7 +112,6 @@ pub fn get_billing_info(token: &str, username: &str) -> Result<BillingInfo, Stri
         Err(e) => {
             eprintln!("   PERINGATAN: Format data billing tidak dikenal ({})", e);
             return Ok(BillingInfo {
-                total_core_hours_used: 999.0,
                 hours_remaining: 0.0,
                 is_quota_ok: false,
             });
@@ -139,20 +133,19 @@ pub fn get_billing_info(token: &str, username: &str) -> Result<BillingInfo, Stri
             } else if item.sku.contains("compute 32-core") {
                 32.0
             } else {
-                continue; // Unknown SKU, skip
+                continue;
             };
             
             total_core_hours_used += item.quantity * multiplier;
         }
     }
     
-    let included_core_hours = 180.0; // Free tier GitHub
+    let included_core_hours = 180.0;
     let remaining_core_hours = (included_core_hours - total_core_hours_used).max(0.0);
     
-    // Asumsi kita menjalankan 2x standardLinux32gb (4-core) = 8 core total
     let hours_remaining = (remaining_core_hours / 8.0).max(0.0);
     
-    let is_quota_ok = hours_remaining > 1.0; // Butuh minimal 1 jam sisa
+    let is_quota_ok = hours_remaining > 1.0;
     
     println!("Billing @{}: Digunakan ~{:.1} dari {:.1} core-hours | Kira-kira {:.1} jam tersisa", 
         username, 
@@ -168,7 +161,6 @@ pub fn get_billing_info(token: &str, username: &str) -> Result<BillingInfo, Stri
     }
     
     Ok(BillingInfo {
-        total_core_hours_used,
         hours_remaining,
         is_quota_ok,
     })
