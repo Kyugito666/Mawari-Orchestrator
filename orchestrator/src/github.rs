@@ -1,5 +1,7 @@
 // orchestrator/src/github.rs
 
+// Import State struct so the function signature can use it
+use crate::config::State;
 use std::process::Command;
 use std::fmt;
 use std::thread;
@@ -72,7 +74,6 @@ fn health_check(token: &str, name: &str) -> bool {
     }
 }
 
-// MODIFIED: 'setup_mode' ditambahkan untuk membedakan setup wallet
 pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, setup_mode: &str) -> Result<(), GHError> {
     println!("   Memverifikasi dan menjalankan node di '{}'...", name);
     
@@ -81,7 +82,6 @@ pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, s
         match run_gh_command(token, &["codespace", "ssh", "-c", name, "--", "echo 'ready'"]) {
             Ok(output) if output.contains("ready") => {
                 println!("      ✅ SSH sudah siap!");
-                // MODIFIED: Menyuntikkan environment variable SETUP_MODE saat eksekusi
                 let exec_command = format!("bash -l -c 'export SETUP_MODE={} && bash {}'", setup_mode, script_path);
                 
                 println!("      🚀 Menjalankan skrip auto-start (Mode: {}): {}", setup_mode, script_path);
@@ -100,13 +100,12 @@ pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, s
     Err(GHError::CommandError(format!("Timeout: SSH tidak siap untuk '{}'", name)))
 }
 
-
-// MODIFIED: Fungsi ini sekarang mengelola DUA codespace Mawari
-pub fn ensure_mawari_codespaces(token: &str, repo: &str) -> Result<(String, String), GHError> {
+// FIX: Function signature now correctly accepts the `state` argument
+pub fn ensure_mawari_codespaces(token: &str, repo: &str, state: &State) -> Result<(String, String), GHError> {
     println!("  Mengecek Codespace Mawari yang ada...");
     
-    let mut cs1_name = String::new(); // Untuk 1+5 wallets
-    let mut cs2_name = String::new(); // Untuk 6 wallets
+    let mut cs1_name = state.mawari_codespace_name.clone();
+    let mut cs2_name = state.nexus_codespace_name.clone();
 
     let list_output = run_gh_command(token, &["codespace", "list", "--json", "name,repository,state,displayName"])?;
     
@@ -119,7 +118,8 @@ pub fn ensure_mawari_codespaces(token: &str, repo: &str) -> Result<(String, Stri
                 let state = cs["state"].as_str().unwrap_or("").to_string();
                 let display_name = cs["displayName"].as_str().unwrap_or("");
 
-                let mut process_node = |current_name: &mut String, target_display: &str| -> Result<(), GHError> {
+                // FIX: Removed `mut` as it's not needed, silencing the warning.
+                let process_node = |current_name: &mut String, target_display: &str| -> Result<(), GHError> {
                     if display_name == target_display {
                         println!("  -> Ditemukan '{}': {} (State: {})", target_display, name, state);
                         
@@ -143,7 +143,6 @@ pub fn ensure_mawari_codespaces(token: &str, repo: &str) -> Result<(String, Stri
 
     let script_path = "/workspaces/Mawari-Orchestrator/mawari/auto-start.sh";
 
-    // --- Logic untuk Codespace #1 (1+5 Wallets) ---
     if cs1_name.is_empty() {
         println!("\n  Membuat codespace 'mawari-nodes-1'...");
         let new_name = run_gh_command(token, &["codespace", "create", "-r", repo, "-m", "standardLinux32gb", "--display-name", "mawari-nodes-1", "--idle-timeout", "240m"])?;
@@ -157,7 +156,6 @@ pub fn ensure_mawari_codespaces(token: &str, repo: &str) -> Result<(String, Stri
     println!("\n  Menunggu 10 detik sebelum lanjut ke codespace berikutnya...\n");
     thread::sleep(Duration::from_secs(10));
     
-    // --- Logic untuk Codespace #2 (6 Wallets) ---
     if cs2_name.is_empty() {
         println!("\n  Membuat codespace 'mawari-nodes-2'...");
         let new_name = run_gh_command(token, &["codespace", "create", "-r", repo, "-m", "standardLinux32gb", "--display-name", "mawari-nodes-2", "--idle-timeout", "240m"])?;
@@ -171,3 +169,4 @@ pub fn ensure_mawari_codespaces(token: &str, repo: &str) -> Result<(String, Stri
     println!("\n  ✅ Kedua codespace Mawari siap!");
     Ok((cs1_name, cs2_name))
 }
+
