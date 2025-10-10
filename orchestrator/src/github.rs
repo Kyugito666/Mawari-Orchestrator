@@ -1,347 +1,368 @@
-// orchestrator/src/main.rs - Production Ready Version
+// orchestrator/src/github.rs - Production-Ready Version
 
-mod config;
-mod github;
-mod billing;
-
+use crate::config::State;
+use std::process::{Command, Stdio};
+use std::fmt;
 use std::thread;
-use std::time::{Duration, Instant};
-use std::env;
+use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-const STATE_FILE: &str = "state.json";
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3 * 3600 + 30 * 60); // 3.5 jam
-const MIN_QUOTA_HOURS: f32 = 1.0;
-const MAX_CONSECUTIVE_FAILURES: usize = 3;
-const FAILURE_COOLDOWN_SECS: u64 = 600; // 10 menit
-const DEPLOY_FAILURE_COOLDOWN_SECS: u64 = 900; // 15 menit
+#[derive(Debug)]
+pub enum GHError {
+    CommandError(String),
+    AuthError(String),
+    Timeout(String),
+}
 
-fn show_status() {
-    println!("╔════════════════════════════════════════════════╗");
-    println!("║        ORCHESTRATOR STATUS                    ║");
-    println!("╚════════════════════════════════════════════════╝");
-    
-    match config::load_state(STATE_FILE) {
-        Ok(state) => {
-            println!("State file ditemukan");
-            println!("Current Token Index: {}", state.current_account_index);
-            if !state.mawari_node_1_name.is_empty() {
-                println!("Node 1: {}", state.mawari_node_1_name);
-            }
-            if !state.mawari_node_2_name.is_empty() {
-                println!("Node 2: {}", state.mawari_node_2_name);
-            }
-        }
-        Err(_) => {
-            println!("Tidak ada file state ditemukan");
-        }
-    }
-    
-    println!("\nTokens Tersedia:");
-    match config::load_config("tokens.json") {
-        Ok(cfg) => {
-            println!("   Total: {} token", cfg.tokens.len());
-        }
-        Err(e) => {
-            eprintln!("   Error: {}", e);
+impl fmt::Display for GHError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            GHError::CommandError(e) => write!(f, "Command gagal: {}", e),
+            GHError::AuthError(e) => write!(f, "Auth error: {}", e),
+            GHError::Timeout(e) => write!(f, "Timeout: {}", e),
         }
     }
 }
 
-fn verify_current() {
-    println!("╔════════════════════════════════════════════════╗");
-    println!("║        VERIFIKASI NODE                      ║");
-    println!("╚════════════════════════════════════════════════╝");
+// Helper dengan timeout protection
+fn run_gh_command_with_timeout(token: &str, args: &[&str], timeout_secs: u64) -> Result<String, GHError> {
+    eprintln!("DEBUG: gh {} (timeout: {}s)", args.join(" "), timeout_secs);
     
-    let state = match config::load_state(STATE_FILE) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("Tidak ada file state ditemukan");
-            return;
-        }
-    };
+    let token_clone = token.to_string();
+    let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     
-    let config = match config::load_config("tokens.json") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error memuat token: {}", e);
-            return;
-        }
-    };
+    let result = Arc::new(Mutex::new(None));
+    let result_clone = Arc::clone(&result);
+    let completed = Arc::new(AtomicBool::new(false));
+    let completed_clone = Arc::clone(&completed);
     
-    if state.current_account_index >= config.tokens.len() {
-        eprintln!("Indeks token tidak valid");
-        return;
-    }
-    
-    let token = &config.tokens[state.current_account_index];
-    
-    println!("Indeks Token: {}", state.current_account_index);
-    
-    if !state.mawari_node_1_name.is_empty() {
-        println!("\n🔍 Memverifikasi Node 1: {}", state.mawari_node_1_name);
-        match github::verify_codespace(token, &state.mawari_node_1_name) {
-            Ok(true) => println!("   ✅ BERJALAN & TERSEDIA"),
-            Ok(false) => println!("   ⚠️ TIDAK TERSEDIA atau BERHENTI"),
-            Err(e) => eprintln!("   ❌ Error: {}", e),
-        }
-    }
-    
-    if !state.mawari_node_2_name.is_empty() {
-        println!("\n🔍 Memverifikasi Node 2: {}", state.mawari_node_2_name);
-        match github::verify_codespace(token, &state.mawari_node_2_name) {
-            Ok(true) => println!("   ✅ BERJALAN & TERSEDIA"),
-            Ok(false) => println!("   ⚠️ TIDAK TERSEDIA atau BERHENTI"),
-            Err(e) => eprintln!("   ❌ Error: {}", e),
-        }
-    }
-}
-
-fn restart_nodes(token: &str, name1: &str, name2: &str, repo_name: &str) {
-    println!("\n╔════════════════════════════════════════════════╗");
-    println!("║        SIKLUS KEEP-ALIVE                      ║");
-    println!("╚════════════════════════════════════════════════╝");
-    
-    let repo_basename = repo_name.split('/').last().unwrap_or("Mawari-Orchestrator");
-    let script_path = format!("/workspaces/{}/mawari/auto-start.sh", repo_basename);
-    
-    if !name1.is_empty() {
-        println!("  🔄 Merestart Node 1 (PRIMARY): {}", name1);
-        match github::wait_and_run_startup_script(token, name1, &script_path, "PRIMARY") {
-            Ok(_) => println!("    ✅ Restart berhasil"),
-            Err(e) => eprintln!("    ⚠️ Peringatan: {}", e),
-        }
-        thread::sleep(Duration::from_secs(5));
-    }
-    
-    if !name2.is_empty() {
-        println!("  🔄 Merestart Node 2 (SECONDARY): {}", name2);
-        match github::wait_and_run_startup_script(token, name2, &script_path, "SECONDARY") {
-            Ok(_) => println!("    ✅ Restart berhasil"),
-            Err(e) => eprintln!("    ⚠️ Peringatan: {}", e),
-        }
-    }
-    
-    println!("\n✅ Siklus keep-alive selesai!\n");
-}
-
-fn switch_to_next_token(
-    current_index: usize, 
-    total_tokens: usize,
-    state: &mut config::State
-) -> usize {
-    let next_index = (current_index + 1) % total_tokens;
-    state.current_account_index = next_index;
-    
-    // Clear node names saat switch account untuk force re-create
-    state.mawari_node_1_name.clear();
-    state.mawari_node_2_name.clear();
-    
-    if let Err(e) = config::save_state(STATE_FILE, state) {
-        eprintln!("⚠️ Gagal save state: {}", e);
-    }
-    
-    next_index
-}
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    
-    if args.len() > 1 {
-        let command = args[1].trim_matches('"');
-        match command {
-            "status" => {
-                show_status();
-                return;
-            }
-            "verify" => {
-                verify_current();
-                return;
-            }
-            _ => {}
-        }
-    }
-    
-    if args.len() < 2 {
-        eprintln!("❌ ERROR: Argumen repositori tidak ada!");
-        eprintln!("Gunakan: .\\start.bat \"username/repo-name\"");
-        eprintln!("   atau: cargo run --release -- status");
-        eprintln!("   atau: cargo run --release -- verify");
-        return;
-    }
-    
-    let repo_name = args[1].trim_matches('"');
-
-    println!("╔════════════════════════════════════════════════╗");
-    println!("║   MAWARI 12-NODE MULTI-WALLET ORCHESTRATOR    ║");
-    println!("║            (Versi Production-Ready)           ║");
-    println!("╚════════════════════════════════════════════════╝");
-    println!("📦 Repositori: {}", repo_name);
-    println!("");
-
-    let config = match config::load_config("tokens.json") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("❌ FATAL: {}", e);
-            eprintln!("   Pastikan 'orchestrator/config/tokens.json' ada dan formatnya benar.");
-            return;
-        }
-    };
-
-    println!("✅ Berhasil memuat {} token", config.tokens.len());
-
-    let mut state = config::load_state(STATE_FILE).unwrap_or_default();
-    let mut i = state.current_account_index;
-    
-    if i >= config.tokens.len() {
-        println!("⚠️ Mereset indeks tidak valid {} ke 0", i);
-        i = 0;
-        state.current_account_index = 0;
-    }
-
-    let mut consecutive_failures = 0;
-
-    println!("\n🚀 Memulai loop orkestrasi...\n");
-
-    loop {
-        let token = &config.tokens[i];
+    let handle = thread::spawn(move || {
+        let output = Command::new("gh")
+            .args(&args_vec)
+            .env("GH_TOKEN", &token_clone)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
         
-        println!("\n╔════════════════════════════════════════════════╗");
-        println!("║           TOKEN #{:<2} dari {:<2}                   ║", i + 1, config.tokens.len());
-        println!("╚════════════════════════════════════════════════╝");
-
-        // === PHASE 1: Token Validation ===
-        let username = match github::get_username(token) {
-            Ok(u) => {
-                println!("✅ Token valid untuk: @{}", u);
-                consecutive_failures = 0;
-                u
-            },
-            Err(e) => {
-                eprintln!("❌ Error token: {}", e);
-                consecutive_failures += 1;
-                
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    eprintln!("\n⚠️ Terlalu banyak kegagalan token ({}). Cooldown {} menit...", 
-                        consecutive_failures, FAILURE_COOLDOWN_SECS / 60);
-                    thread::sleep(Duration::from_secs(FAILURE_COOLDOWN_SECS));
-                    consecutive_failures = 0;
-                }
-                
-                i = switch_to_next_token(i, config.tokens.len(), &mut state);
-                thread::sleep(Duration::from_secs(5));
-                continue;
-            }
-        };
-
-        // === PHASE 2: Billing Check ===
-        println!("\n📊 Mengecek kuota billing...");
-        let billing = match billing::get_billing_info(token, &username) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("⚠️ Pengecekan billing gagal: {}", e);
-                eprintln!("   Anggap kuota habis, skip ke akun berikutnya...");
-                i = switch_to_next_token(i, config.tokens.len(), &mut state);
-                thread::sleep(Duration::from_secs(5));
-                continue;
-            }
-        };
-
-        if !billing.is_quota_ok {
-            eprintln!("\n⚠️ Kuota tidak cukup untuk @{}", username);
-            eprintln!("   Beralih ke akun berikutnya...\n");
-            i = switch_to_next_token(i, config.tokens.len(), &mut state);
-            thread::sleep(Duration::from_secs(5));
-            continue;
+        if completed_clone.load(Ordering::Relaxed) {
+            return; // Timeout sudah terjadi
         }
+        
+        let mut res = result_clone.lock().unwrap();
+        *res = Some(output);
+    });
+    
+    let timeout_duration = Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+    
+    while start.elapsed() < timeout_duration {
+        if handle.is_finished() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    
+    if !handle.is_finished() {
+        completed.store(true, Ordering::Relaxed);
+        return Err(GHError::Timeout(format!("Command timeout setelah {}s", timeout_secs)));
+    }
+    
+    let _ = handle.join();
+    
+    let output_result = result.lock().unwrap().take()
+        .ok_or_else(|| GHError::CommandError("Thread result kosong".to_string()))?
+        .map_err(|e| GHError::CommandError(format!("Gagal mengeksekusi gh: {}", e)))?;
 
-        // === PHASE 3: Codespace Deployment ===
-        println!("\n🚀 Memastikan Codespace sehat untuk @{}...", username);
-        let (node1_name, node2_name) = match github::ensure_healthy_codespaces(token, repo_name, &state) {
-            Ok(names) => {
-                consecutive_failures = 0;
-                names
-            },
+    let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
+    
+    if !output_result.status.success() {
+        if stderr.contains("Bad credentials") 
+            || stderr.contains("authentication required")
+            || stderr.contains("HTTP 401") {
+            return Err(GHError::AuthError(stderr));
+        }
+        
+        if stderr.contains("no codespaces found") || stdout.trim().is_empty() {
+            return Ok("".to_string());
+        }
+        
+        return Err(GHError::CommandError(stderr));
+    }
+    
+    Ok(stdout.trim().to_string())
+}
+
+fn run_gh_command(token: &str, args: &[&str]) -> Result<String, GHError> {
+    run_gh_command_with_timeout(token, args, 60)
+}
+
+pub fn get_username(token: &str) -> Result<String, GHError> {
+    run_gh_command(token, &["api", "user", "--jq", ".login"])
+}
+
+fn stop_codespace(token: &str, name: &str) -> Result<(), GHError> {
+    println!("      Menghentikan '{}'...", name);
+    
+    for attempt in 1..=2 {
+        match run_gh_command_with_timeout(token, &["codespace", "stop", "-c", name], 45) {
+            Ok(_) => {
+                println!("      Berhenti");
+                thread::sleep(Duration::from_secs(3));
+                return Ok(());
+            }
             Err(e) => {
-                eprintln!("\n❌ Deployment gagal: {}", e);
-                consecutive_failures += 1;
-                
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    eprintln!("\n⚠️ Terlalu banyak kegagalan deployment ({}). Cooldown {} menit...", 
-                        consecutive_failures, DEPLOY_FAILURE_COOLDOWN_SECS / 60);
-                    thread::sleep(Duration::from_secs(DEPLOY_FAILURE_COOLDOWN_SECS));
-                    consecutive_failures = 0;
+                if attempt < 2 {
+                    eprintln!("      Retry stop {}/2...", attempt);
+                    thread::sleep(Duration::from_secs(2));
                 } else {
-                    eprintln!("   Mencoba lagi dalam 5 menit...");
-                    thread::sleep(Duration::from_secs(300));
+                    eprintln!("      Peringatan saat berhenti: {}", e);
+                    return Ok(()); // Non-blocking
                 }
-                continue;
             }
-        };
-
-        // === PHASE 4: Success - Save State ===
-        println!("\n╔════════════════════════════════════════════════╗");
-        println!("║         DEPLOYMENT BERHASIL! 🎉              ║");
-        println!("╚════════════════════════════════════════════════╝");
-        println!("Akun: @{}", username);
-        println!("Node 1:  {}", node1_name);
-        println!("Node 2:  {}", node2_name);
-        
-        state.current_account_index = i;
-        state.mawari_node_1_name = node1_name.clone();
-        state.mawari_node_2_name = node2_name.clone();
-        
-        if let Err(e) = config::save_state(STATE_FILE, &state) {
-            eprintln!("⚠️ Gagal save state: {}", e);
         }
-
-        // === PHASE 5: Calculate Runtime ===
-        let run_duration_hours = (billing.hours_remaining - 0.5)
-            .max(0.5)
-            .min(20.0);
-        let run_duration = Duration::from_secs((run_duration_hours * 3600.0) as u64);
-        
-        println!("\n⏱️ Berjalan selama {:.1} jam", run_duration_hours);
-        println!("   Interval Keep-alive: {:.1} jam", KEEP_ALIVE_INTERVAL.as_secs() as f32 / 3600.0);
-        
-        let start_time = Instant::now();
-        let mut cycle_count = 0;
-        
-        // === PHASE 6: Keep-Alive Loop ===
-        while start_time.elapsed() < run_duration {
-            let remaining = run_duration.saturating_sub(start_time.elapsed());
-            let sleep_for = std::cmp::min(remaining, KEEP_ALIVE_INTERVAL);
-            
-            if sleep_for.as_secs() < 60 {
-                println!("\n⏰ Waktu habis! Beralih akun...");
-                break;
-            }
-
-            let hours_left = remaining.as_secs() as f32 / 3600.0;
-            println!("\n💤 Tidur selama {:.1} jam (sisa: {:.1} jam)...", 
-                sleep_for.as_secs() as f32 / 3600.0, hours_left);
-            
-            thread::sleep(sleep_for);
-
-            if start_time.elapsed() >= run_duration {
-                break;
-            }
-            
-            cycle_count += 1;
-            restart_nodes(token, &node1_name, &node2_name, repo_name);
-        }
-        
-        // === PHASE 7: Cycle Complete ===
-        println!("\n╔════════════════════════════════════════════════╗");
-        println!("║         SIKLUS SELESAI                        ║");
-        println!("╚════════════════════════════════════════════════╝");
-        println!("Akun: @{}", username);
-        println!("Durasi: {:.1} jam", run_duration_hours);
-        println!("Siklus Keep-alive: {}", cycle_count);
-        println!("⏭️ Beralih ke token berikutnya...\n");
-        
-        i = switch_to_next_token(i, config.tokens.len(), &mut state);
-        
-        println!("⏸️ Cooldown 30 detik...");
-        thread::sleep(Duration::from_secs(30));
     }
+    Ok(())
+}
+
+fn delete_codespace(token: &str, name: &str) -> Result<(), GHError> {
+    println!("      Menghapus '{}'...", name);
+    
+    for attempt in 1..=3 {
+        match run_gh_command_with_timeout(token, &["codespace", "delete", "-c", name, "--force"], 45) {
+            Ok(_) => {
+                println!("      Terhapus");
+                thread::sleep(Duration::from_secs(2));
+                return Ok(());
+            }
+            Err(e) => {
+                if attempt < 3 {
+                    eprintln!("      Retry delete {}/3... ({})", attempt, 
+                        e.to_string().lines().next().unwrap_or("unknown"));
+                    thread::sleep(Duration::from_secs(3));
+                } else {
+                    eprintln!("      Gagal hapus ({}), melanjutkan...", 
+                        e.to_string().lines().next().unwrap_or("unknown"));
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_codespace(token: &str, name: &str) -> Result<bool, GHError> {
+    match run_gh_command_with_timeout(
+        token, 
+        &["codespace", "view", "-c", name, "--json", "state", "-q", ".state"],
+        30
+    ) {
+        Ok(state) if state == "Available" => Ok(true),
+        Ok(_) => Ok(false),
+        Err(GHError::Timeout(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn health_check(token: &str, name: &str) -> bool {
+    let check_cmd = "test -f /tmp/mawari_auto_start_done && echo 'healthy' || echo 'unhealthy'";
+    
+    match run_gh_command_with_timeout(
+        token, 
+        &["codespace", "ssh", "-c", name, "--", check_cmd],
+        25
+    ) {
+        Ok(output) if output.contains("healthy") => {
+            eprintln!("      Health check: ✅ PASS");
+            true
+        }
+        Ok(_) => {
+            eprintln!("      Health check: ❌ FAIL (marker tidak ada)");
+            false
+        }
+        Err(e) => {
+            eprintln!("      Health check: ❌ FAIL ({})", 
+                e.to_string().lines().next().unwrap_or("error"));
+            false
+        }
+    }
+}
+
+pub fn wait_and_run_startup_script(token: &str, name: &str, script_path: &str, setup_mode: &str) -> Result<(), GHError> {
+    println!("   Memverifikasi dan menjalankan node di '{}'...", name);
+    
+    // Phase 1: SSH Readiness Check
+    for attempt in 1..=8 {
+        println!("      SSH Check {}/8...", attempt);
+        
+        match run_gh_command_with_timeout(
+            token, 
+            &["codespace", "ssh", "-c", name, "--", "echo 'ready'"],
+            20
+        ) {
+            Ok(output) if output.contains("ready") => {
+                println!("      SSH siap!");
+                break;
+            }
+            Err(GHError::Timeout(_)) if attempt < 8 => {
+                println!("      Timeout, retry...");
+                thread::sleep(Duration::from_secs(15));
+            }
+            _ if attempt < 8 => {
+                println!("      Belum siap, tunggu 20s...");
+                thread::sleep(Duration::from_secs(20));
+            }
+            _ => {
+                return Err(GHError::Timeout(format!("SSH tidak siap untuk '{}'", name)));
+            }
+        }
+    }
+    
+    // Phase 2: Script Execution
+    let exec_command = format!(
+        "bash -l -c 'export SETUP_MODE={} && nohup bash {} > /tmp/mawari_startup.log 2>&1 & echo $!'",
+        setup_mode, 
+        script_path
+    );
+    
+    println!("      Eksekusi skrip (Mode: {})...", setup_mode);
+    
+    match run_gh_command_with_timeout(
+        token, 
+        &["codespace", "ssh", "-c", name, "--", &exec_command],
+        30
+    ) {
+        Ok(pid) if !pid.is_empty() => {
+            println!("      Skrip dijalankan (PID: {})", pid.lines().next().unwrap_or("unknown"));
+            Ok(())
+        }
+        Ok(_) => {
+            eprintln!("      Peringatan: Skrip dieksekusi tapi tanpa PID");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("      Peringatan eksekusi: {}", 
+                e.to_string().lines().next().unwrap_or("unknown"));
+            Ok(()) // Non-blocking untuk startup script
+        }
+    }
+}
+
+pub fn ensure_healthy_codespaces(token: &str, repo: &str, state: &State) -> Result<(String, String), GHError> {
+    println!("  Memeriksa Codespace yang ada...");
+    
+    let mut node1_name = state.mawari_node_1_name.clone();
+    let mut node2_name = state.mawari_node_2_name.clone();
+
+    let list_output = run_gh_command(
+        token, 
+        &["codespace", "list", "--json", "name,repository,state,displayName"]
+    )?;
+    
+    let mut found_cs1 = false;
+    let mut found_cs2 = false;
+
+    if !list_output.is_empty() {
+        // Parse sebagai array JSON utuh, bukan per-line
+        if let Ok(codespaces) = serde_json::from_str::<Vec<serde_json::Value>>(&list_output) {
+            for cs in codespaces {
+                let name = cs["name"].as_str().unwrap_or("").to_string();
+                let cs_repo = cs["repository"]["nameWithOwner"].as_str().unwrap_or("");
+                let cs_state = cs["state"].as_str().unwrap_or("");
+                let display_name = cs["displayName"].as_str().unwrap_or("");
+                
+                if cs_repo != repo { continue; }
+
+                // Process Node 1
+                if display_name == "mawari-multi-node-1" && !found_cs1 {
+                    println!("  Menemukan 'mawari-multi-node-1': {} (State: {})", name, cs_state);
+                    
+                    if cs_state == "Available" && health_check(token, &name) {
+                        println!("    Health check LULUS. Digunakan kembali.");
+                        node1_name = name.clone();
+                        found_cs1 = true;
+                    } else {
+                        println!("    Health check GAGAL. Dibuat ulang...");
+                        if cs_state == "Available" || cs_state == "Running" {
+                            stop_codespace(token, &name)?;
+                        }
+                        delete_codespace(token, &name)?;
+                    }
+                }
+
+                // Process Node 2
+                if display_name == "mawari-multi-node-2" && !found_cs2 {
+                    println!("  Menemukan 'mawari-multi-node-2': {} (State: {})", name, cs_state);
+                    
+                    if cs_state == "Available" && health_check(token, &name) {
+                        println!("    Health check LULUS. Digunakan kembali.");
+                        node2_name = name.clone();
+                        found_cs2 = true;
+                    } else {
+                        println!("    Health check GAGAL. Dibuat ulang...");
+                        if cs_state == "Available" || cs_state == "Running" {
+                            stop_codespace(token, &name)?;
+                        }
+                        delete_codespace(token, &name)?;
+                    }
+                }
+            }
+        } else {
+            eprintln!("  Peringatan: Format list codespace tidak valid");
+        }
+    }
+    
+    let repo_basename = repo.split('/').last().unwrap_or("Mawari-Orchestrator");
+    let script_path = format!("/workspaces/{}/mawari/auto-start.sh", repo_basename);
+
+    // Create Node 1 jika belum ada
+    if !found_cs1 {
+        println!("  Membuat 'mawari-multi-node-1'...");
+        let new_name = run_gh_command(token, &[
+            "codespace", "create", 
+            "-r", repo, 
+            "-m", "standardLinux32gb",
+            "--display-name", "mawari-multi-node-1", 
+            "--idle-timeout", "240m"
+        ])?;
+        
+        if new_name.is_empty() { 
+            return Err(GHError::CommandError("Gagal membuat node-1 (output kosong)".to_string())); 
+        }
+        
+        node1_name = new_name;
+        println!("     Dibuat: {}", node1_name);
+        
+        thread::sleep(Duration::from_secs(5)); // Beri waktu provisioning
+        wait_and_run_startup_script(token, &node1_name, &script_path, "PRIMARY")?;
+    }
+    
+    // Gap lebih lama antar node creation untuk stabilitas
+    thread::sleep(Duration::from_secs(15));
+    
+    // Create Node 2 jika belum ada
+    if !found_cs2 {
+        println!("  Membuat 'mawari-multi-node-2'...");
+        let new_name = run_gh_command(token, &[
+            "codespace", "create", 
+            "-r", repo, 
+            "-m", "standardLinux32gb",
+            "--display-name", "mawari-multi-node-2", 
+            "--idle-timeout", "240m"
+        ])?;
+        
+        if new_name.is_empty() { 
+            return Err(GHError::CommandError("Gagal membuat node-2 (output kosong)".to_string())); 
+        }
+        
+        node2_name = new_name;
+        println!("     Dibuat: {}", node2_name);
+        
+        thread::sleep(Duration::from_secs(5));
+        wait_and_run_startup_script(token, &node2_name, &script_path, "SECONDARY")?;
+    }
+
+    println!("\n  Kedua Codespace siap!");
+    Ok((node1_name, node2_name))
 }
